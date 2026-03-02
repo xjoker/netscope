@@ -4,10 +4,14 @@ use reqwest::Client;
 
 use crate::probe::types::{ProbeMethod, ProbeResult, ProbeTarget};
 
-// Number of timing samples per probe.  The first sample warms up the TCP/TLS
-// connection; subsequent samples measure steady-state latency.  Displayed
-// ttfb_ms is the average of samples [1..].
-const PROBE_SAMPLES: usize = 3;
+// Number of steady-state timing samples per probe (after warmup).
+// The first request warms up the TCP/TLS connection and is discarded.
+// After a short cooldown, PROBE_SAMPLES measurements are taken; the
+// highest and lowest are dropped and the rest are averaged (trimmed mean).
+const PROBE_SAMPLES: usize = 5;
+
+// Brief pause after warmup to let kernel buffers and congestion window settle.
+const WARMUP_COOLDOWN_MS: u64 = 50;
 
 pub async fn execute_probe(
     client: &Client,
@@ -56,24 +60,30 @@ async fn sample_ttfb(client: &Client, url: &str, timeout_secs: u64) -> Option<f6
 }
 
 /// Collect PROBE_SAMPLES timing samples for a reachable site and return the
-/// average of samples[1..] (skipping the cold-start first sample).
-async fn avg_ttfb(client: &Client, url: &str, timeout_secs: u64, first_ms: f64) -> f64 {
-    if PROBE_SAMPLES <= 1 {
-        return first_ms;
-    }
-    let mut samples = vec![first_ms];
-    for _ in 1..PROBE_SAMPLES {
+/// trimmed mean (drop highest and lowest, average the rest).
+/// The first request (warmup) has already been done by the caller; we sleep
+/// briefly, then take PROBE_SAMPLES fresh measurements.
+async fn avg_ttfb(client: &Client, url: &str, timeout_secs: u64, _first_ms: f64) -> f64 {
+    // Cooldown after warmup request
+    tokio::time::sleep(std::time::Duration::from_millis(WARMUP_COOLDOWN_MS)).await;
+
+    let mut samples = Vec::with_capacity(PROBE_SAMPLES);
+    for _ in 0..PROBE_SAMPLES {
         if let Some(ms) = sample_ttfb(client, url, timeout_secs).await {
             samples.push(ms);
         }
     }
-    // Average of samples[1..] if available, otherwise fall back to all samples
-    let warm: Vec<f64> = if samples.len() > 1 {
-        samples[1..].to_vec()
-    } else {
-        samples
-    };
-    warm.iter().sum::<f64>() / warm.len() as f64
+    if samples.is_empty() {
+        return _first_ms; // fallback: no successful sample, use warmup value
+    }
+    if samples.len() <= 2 {
+        // Not enough to trim; plain average
+        return samples.iter().sum::<f64>() / samples.len() as f64;
+    }
+    // Trimmed mean: drop min and max, average the rest
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let trimmed = &samples[1..samples.len() - 1];
+    trimmed.iter().sum::<f64>() / trimmed.len() as f64
 }
 
 async fn probe_trace(client: &Client, target: &ProbeTarget, timeout_secs: u64) -> ProbeResult {

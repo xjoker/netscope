@@ -5,7 +5,7 @@ use std::io;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use crossterm::event::{self, Event as CEvent, KeyCode};
+use crossterm::event::{self, Event as CEvent, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen,
@@ -82,6 +82,8 @@ pub fn run_tui_loop(
         // Wait for a keyboard event (with timeout)
         if event::poll(tick_ms)? {
             if let CEvent::Key(key) = event::read()? {
+                // Windows emits both Press and Release events; only handle Press.
+                if key.kind != KeyEventKind::Press { continue; }
                 match key.code {
                     // q/Q/Esc exit at any time; abort the task if speed test is still running
                     KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
