@@ -128,11 +128,6 @@ async fn main() -> ExitCode {
                 ul_repeat: 2,
             })
         ).to_string();
-        let tui_target  = match cli.backend.as_str() {
-            "cloudflare" => "speed.cloudflare.com".to_string(),
-            _            => "mensura.cdn-apple.com".to_string(),
-        };
-        let tui_timeout = cli.timeout;
         let tui_proxy   = cli.proxy.clone();
         let tui_backend = cli.backend.clone();
 
@@ -142,7 +137,7 @@ async fn main() -> ExitCode {
 
         // Launch the TUI rendering loop on a dedicated OS thread (crossterm event polling is synchronous/blocking)
         let tui_handle = std::thread::spawn(move || {
-            tui::run_tui_loop(rx, tui_mode, tui_target, tui_timeout, tui_proxy, tui_backend, abort_handle)
+            tui::run_tui_loop(rx, tui_mode, tui_proxy, tui_backend, abort_handle)
         });
 
         let exit_code = match speed_task.await {

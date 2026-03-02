@@ -69,15 +69,10 @@ pub fn box_sep_row(c: &Colors) {
 }
 
 pub fn emit_status(is_json: bool, kind: StatusKind, step: &str, message: &str) {
-    if is_json {
-        let tag = match kind { StatusKind::Info => "INFO", StatusKind::Ok => "OK  ", StatusKind::Error => "ERR " };
-        eprintln!("[{tag}] {step:<10} {message}");
-        return;
-    }
-    // Silent in TUI mode: already rendered on alternate screen, skip stdout
-    if crate::tui::global_tx().is_some() {
-        return;
-    }
+    // JSON mode: all progress is suppressed; only the final JSON blob goes to stdout
+    if is_json { return; }
+    // TUI mode: events are sent via channel, not printed
+    if crate::tui::global_tx().is_some() { return; }
 
     let c = Colors::new();
     let (sym, col) = match kind {
@@ -90,10 +85,8 @@ pub fn emit_status(is_json: bool, kind: StatusKind, step: &str, message: &str) {
 }
 
 pub fn emit_start_banner(is_json: bool, mode: &str, base_url: &Url, timeout: u64) {
-    if is_json {
-        eprintln!("[INFO] starting mode={mode} target={base_url} timeout={timeout}s");
-        return;
-    }
+    // JSON mode: suppress banner entirely (final JSON is the only stdout output)
+    if is_json { return; }
     // Skip banner in TUI mode
     if crate::tui::global_tx().is_some() {
         return;

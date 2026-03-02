@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Padding, Paragraph},
 };
 
-use crate::tui::state::{AppState, StageStatus};
+use crate::tui::state::AppState;
 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -14,17 +14,6 @@ fn spin(tick: u64) -> &'static str {
     SPINNER[(tick as usize) % SPINNER.len()]
 }
 
-fn status_icon(status: &StageStatus, tick: u64) -> Span<'static> {
-    match status {
-        StageStatus::Waiting => Span::styled("○", Style::default().fg(Color::DarkGray)),
-        StageStatus::Running => Span::styled(
-            spin(tick).to_string(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ),
-        StageStatus::Ok(_)   => Span::styled("✓", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        StageStatus::Fail(_) => Span::styled("✗", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-    }
-}
 
 fn cyan_bold(s: impl Into<String>) -> Span<'static> {
     Span::styled(s.into(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
@@ -301,25 +290,16 @@ fn header_height(state: &AppState) -> u16 {
 
 fn draw_body(f: &mut Frame, area: Rect, state: &AppState) {
     if !state.paths.is_empty() {
-        // Upper half: left col (Egress/DNS compact) + right col (Speed Stages); lower half: multi-path table
+        // Multi-path mode: Node Info (full-width top) + Speed Progress table (bottom)
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(6), Constraint::Length(state.paths.len() as u16 + 5)])
             .split(area);
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(36), Constraint::Percentage(64)])
-            .split(rows[0]);
-        draw_left_minimal(f, cols[0], state);
-        draw_right_single(f, cols[1], state);
+        draw_left_minimal(f, rows[0], state);
         draw_multipath_progress(f, rows[1], state);
     } else {
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(36), Constraint::Percentage(64)])
-            .split(area);
-        draw_left_minimal(f, cols[0], state);
-        draw_right_single(f, cols[1], state);
+        // Pre-test / single-path fallback: Node Info full-width
+        draw_left_minimal(f, area, state);
     }
 }
 
@@ -426,7 +406,12 @@ fn draw_multipath_progress(f: &mut Frame, area: Rect, state: &AppState) {
     lines.push(Line::from(vec![dim("─".repeat(width.min(98)))]));
 
     for row in &state.paths {
-        let (status_span, pid_col) = if row.done && row.error.is_some() {
+        let (status_span, pid_col) = if row.done && row.current_stage == "merged" {
+            (
+                dim(format!("{:<16}", "→ merged")),
+                dim(format!("{:<10}", row.path_id)),
+            )
+        } else if row.done && row.error.is_some() {
             (
                 Span::styled(format!("{:<16}", "✗ failed"), Style::default().fg(Color::Red)),
                 red(format!("{:<10}", row.path_id)),
@@ -531,80 +516,41 @@ fn draw_multipath_progress(f: &mut Frame, area: Rect, state: &AppState) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-// ── Right column: speed stages (in-progress) ────────────────────────────────────────────
-
-fn draw_right_single(f: &mut Frame, area: Rect, state: &AppState) {
-    let block = Block::default()
-        .title(Line::from(vec![Span::raw(" "), dim("Speed Stages"), Span::raw(" ")]))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .padding(Padding::horizontal(1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let mut lines: Vec<Line> = vec![];
-    let tick = state.tick;
-
-    let stage_line = |status: &StageStatus, label: &'static str| -> Line<'static> {
-        let icon = status_icon(status, tick);
-        let metric = match status {
-            StageStatus::Ok(v)   => white_bold(v.clone()),
-            StageStatus::Fail(e) => red(e.clone()),
-            StageStatus::Running => Span::styled(
-                format!("{} measuring...", spin(tick)),
-                Style::default().fg(Color::Cyan),
-            ),
-            StageStatus::Waiting => dim("waiting"),
-        };
-        Line::from(vec![icon, dim(format!("  {label:<12}")), metric])
-    };
-
-    lines.push(stage_line(&state.ping_status, "Latency"));
-    lines.push(Line::from(vec![]));
-    lines.push(stage_line(&state.download_status, "Download"));
-
-    if !state.download_stages.is_empty() {
-        lines.push(Line::from(vec![dim("    ────────────────────────────────────")]));
-        lines.push(Line::from(vec![
-            dim(format!("    {:<9} {:>4} {:>4} {:>7}  result", "stage", "conc", "chunk", "durs")),
-        ]));
-        for s in &state.download_stages {
-            lines.push(Line::from(vec![
-                dim(format!("    {:<9} {:>4} {:>4} {:>7}  ", s.name, s.concurrency, s.chunk_mib, s.secs)),
-                Span::styled(format!("{:.2} Mbps", s.mbps), Style::default().fg(Color::White)),
-            ]));
-        }
-    }
-
-    lines.push(Line::from(vec![]));
-    lines.push(stage_line(&state.upload_status, "Upload"));
-
-    f.render_widget(Paragraph::new(lines), inner);
-}
 
 // ── Footer ───────────────────────────────────────────────────────
 
 /// Derive (stage_label, done_steps, total_steps) from live AppState.
 ///
-/// Stage sequence (multi-path / apple backend):
-///   egress(1) → resolve+geo(2) → [paths: each has ping+dl+ul = 3 sub-steps] → done
+/// Stage sequence (multi-path full mode):
+///   egress(1) → resolve+geo(2) → [paths: each = 1 unit] → connectivity probe(+1) → done
+/// Other multi-path subcommands (ping/download/upload):
+///   egress(1) → resolve+geo(2) → [paths: each = 1 unit]
 /// Single-path (cloudflare):
 ///   egress(1) → resolve(2) → ping(3) → download(4) → upload(5)
 fn running_progress(state: &AppState) -> (&'static str, usize, usize) {
     // Multi-path mode
     if !state.paths.is_empty() {
-        let path_total = state.paths.len(); // each path counts as 1 unit
-        let paths_done = state.paths.iter().filter(|r| r.done).count();
-        // 2 pre-steps (egress + resolve) + path_total
-        let total = 2 + path_total;
+        let path_total  = state.paths.len();
+        let paths_done  = state.paths.iter().filter(|r| r.done).count();
+        let is_full     = state.mode == "full";
+        // full mode has an extra connectivity probe step after all paths complete
+        let total = 2 + path_total + if is_full { 1 } else { 0 };
         let pre_done = if state.egress_done { 1 } else { 0 }
             + if state.resolved_ip.is_some() || state.egress_done { 1 } else { 0 };
-        let done = pre_done.min(2) + paths_done;
-        let label: &'static str = if !state.egress_done { "detecting egress" }
-            else if paths_done == path_total { "finishing" }
-            else { "speed test" };
+        let probe_done = if !state.probe_results.is_empty() { 1 }
+            else if state.probe_progress.is_none() && paths_done == path_total && is_full { 0 }
+            else { 0 };
+        let done = pre_done.min(2) + paths_done + probe_done;
+
+        let label: &'static str = if !state.egress_done {
+            "detecting egress"
+        } else if paths_done < path_total {
+            "speed test"
+        } else if is_full && state.probe_results.is_empty() {
+            "connectivity probe"
+        } else {
+            "finishing"
+        };
         return (label, done.min(total), total);
     }
     // Single-path mode (cloudflare / simple)
@@ -694,20 +640,20 @@ pub fn draw_result_table(f: &mut Frame, state: &AppState) {
     draw_header(f, outer[0], state);
 
     if has_probe {
-        // Dynamic allocation: speed panel height is fixed; probe panel takes the remainder
+        // Both panels use Min so they each grow when the terminal is taller.
+        // speed_result_height() is the *minimum* needed; extra space is shared between panels.
         let speed_h = speed_result_height(report);
         let body_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(speed_h), Constraint::Min(4)])
+            .constraints([Constraint::Min(speed_h), Constraint::Min(4)])
             .split(outer[1]);
         draw_result_body(f, body_chunks[0], state, report);
         draw_probe_panel(f, body_chunks[1], state, &state.probe_results);
     } else if probing {
-        // Show speed results + in-progress probe panel
         let speed_h = speed_result_height(report);
         let body_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(speed_h), Constraint::Min(3)])
+            .constraints([Constraint::Min(speed_h), Constraint::Min(3)])
             .split(outer[1]);
         draw_result_body(f, body_chunks[0], state, report);
         draw_probe_progress_panel(f, body_chunks[1], state);

@@ -17,13 +17,9 @@ impl StageStatus {
 
 /// Real-time status of a single path in multi-path speed testing
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PathRow {
     /// e.g. "v4-cn", "v4-global", "v6-cn", "v6-global"
     pub path_id: String,
-    pub family: String,
-    /// "cn" or "global"
-    pub side: String,
     /// Name of the currently executing sub-stage
     pub current_stage: String,
     /// Selected CDN node IP for this path
@@ -66,8 +62,6 @@ pub enum Event {
     GeoDone { location: String },
     /// Stage status change (ping / download / upload, single-path mode)
     StageUpdate { stage: &'static str, status: StageStatus },
-    /// Download sub-stage completed (single-path mode)
-    DownloadStage { name: String, concurrency: usize, chunk_mib: u64, secs: u64, mbps: f64 },
     /// Multi-path: path list initialised (before speed test starts)
     PathsInit { paths: Vec<PathRow> },
     /// Multi-path: single-path progress update
@@ -93,15 +87,6 @@ pub enum Event {
     Fatal(String),
 }
 
-#[derive(Debug, Clone)]
-pub struct DownloadStageRow {
-    pub name: String,
-    pub concurrency: usize,
-    pub chunk_mib: u64,
-    pub secs: u64,
-    pub mbps: f64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResultFocus {
     Speed,
@@ -111,10 +96,6 @@ pub enum ResultFocus {
 #[derive(Debug)]
 pub struct AppState {
     pub mode: String,
-    #[allow(dead_code)]
-    pub target: String,
-    #[allow(dead_code)]
-    pub timeout: u64,
     pub proxy: Option<String>,
     /// Speed-test backend: "apple" or "cloudflare"
     pub backend: String,
@@ -144,7 +125,6 @@ pub struct AppState {
     // Speed stages (single-path mode, used by Cloudflare backend)
     pub ping_status: StageStatus,
     pub download_status: StageStatus,
-    pub download_stages: Vec<DownloadStageRow>,
     pub upload_status: StageStatus,
 
     // Multi-path real-time state (used by Apple backend)
@@ -168,7 +148,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(mode: &str, target: &str, timeout: u64, proxy: Option<String>, backend: String) -> Self {
+    pub fn new(mode: &str, proxy: Option<String>, backend: String) -> Self {
         let (ping_status, download_status, upload_status) = match mode {
             "ping"     => (StageStatus::Running, StageStatus::Waiting, StageStatus::Waiting),
             "download" => (StageStatus::Waiting, StageStatus::Running, StageStatus::Waiting),
@@ -177,8 +157,6 @@ impl AppState {
         };
         AppState {
             mode: mode.to_string(),
-            target: target.to_string(),
-            timeout,
             proxy,
             backend,
             cn_mode: None,
@@ -197,7 +175,6 @@ impl AppState {
             location: None,
             ping_status,
             download_status,
-            download_stages: vec![],
             upload_status,
             paths: vec![],
             finished: false,

@@ -22,8 +22,6 @@ pub struct EgressProfile {
 
 #[derive(Debug)]
 struct EgressSample {
-    #[allow(dead_code)]
-    source: &'static str,
     is_cn:  bool,
     family: IpFamily,
     ip:     IpAddr,
@@ -51,7 +49,6 @@ fn parse_ip_from_body(body: &str) -> Option<IpAddr> {
 
 async fn query_plain(
     client: &reqwest::Client,
-    source: &'static str,
     is_cn: bool,
     family: IpFamily,
     url: &'static str,
@@ -60,12 +57,11 @@ async fn query_plain(
     if !resp.status().is_success() { return None; }
     let body = resp.text().await.ok()?;
     let ip = parse_ip_from_body(&body)?;
-    family_check(source, is_cn, family, ip)
+    family_check(is_cn, family, ip)
 }
 
 async fn query_ipify(
     client: &reqwest::Client,
-    source: &'static str,
     is_cn: bool,
     family: IpFamily,
     url: &'static str,
@@ -74,12 +70,11 @@ async fn query_ipify(
     if !resp.status().is_success() { return None; }
     let body: IpifyJson = resp.json().await.ok()?;
     let ip = parse_ip_from_body(&body.ip)?;
-    family_check(source, is_cn, family, ip)
+    family_check(is_cn, family, ip)
 }
 
 async fn query_ipip(
     client: &reqwest::Client,
-    source: &'static str,
     is_cn: bool,
     family: IpFamily,
     url: &'static str,
@@ -88,18 +83,17 @@ async fn query_ipip(
     if !resp.status().is_success() { return None; }
     let body: IpipJson = resp.json().await.ok()?;
     let ip = parse_ip_from_body(&body.data.ip)?;
-    family_check(source, is_cn, family, ip)
+    family_check(is_cn, family, ip)
 }
 
 fn family_check(
-    source: &'static str,
     is_cn: bool,
     family: IpFamily,
     ip: IpAddr,
 ) -> Option<EgressSample> {
     match (family, ip) {
         (IpFamily::V4, IpAddr::V4(_)) | (IpFamily::V6, IpAddr::V6(_)) => {
-            Some(EgressSample { source, is_cn, family, ip })
+            Some(EgressSample { is_cn, family, ip })
         }
         _ => None,
     }
@@ -163,45 +157,45 @@ pub async fn detect_egress_profile(timeout_secs: u64, proxy: Option<&str>) -> Eg
     let mut tasks = tokio::task::JoinSet::<Option<EgressSample>>::new();
 
     macro_rules! spawn_plain {
-        ($c:expr, $src:expr, $cn:expr, $fam:expr, $url:expr) => {{
+        ($c:expr, $cn:expr, $fam:expr, $url:expr) => {{
             let cl = $c.clone();
-            tasks.spawn(async move { query_plain(&cl, $src, $cn, $fam, $url).await });
+            tasks.spawn(async move { query_plain(&cl, $cn, $fam, $url).await });
         }};
     }
     macro_rules! spawn_ipify {
-        ($c:expr, $src:expr, $cn:expr, $fam:expr, $url:expr) => {{
+        ($c:expr, $cn:expr, $fam:expr, $url:expr) => {{
             let cl = $c.clone();
-            tasks.spawn(async move { query_ipify(&cl, $src, $cn, $fam, $url).await });
+            tasks.spawn(async move { query_ipify(&cl, $cn, $fam, $url).await });
         }};
     }
     macro_rules! spawn_ipip {
-        ($c:expr, $src:expr, $cn:expr, $fam:expr, $url:expr) => {{
+        ($c:expr, $cn:expr, $fam:expr, $url:expr) => {{
             let cl = $c.clone();
-            tasks.spawn(async move { query_ipip(&cl, $src, $cn, $fam, $url).await });
+            tasks.spawn(async move { query_ipip(&cl, $cn, $fam, $url).await });
         }};
     }
 
     // CN v4 (using the force-IPv4 client)
     if let Some(ref c4) = client_v4 {
-        spawn_plain!(c4, "itdog-v4-cu",  true,  IpFamily::V4, "https://ipv4_cu.itdog.cn/");
-        spawn_plain!(c4, "3322-v4",      true,  IpFamily::V4, "https://ip.3322.net/");
-        spawn_ipip!( c4, "ipip-v4",      true,  IpFamily::V4, "https://myip.ipip.net/json");
+        spawn_plain!(c4,  true,  IpFamily::V4, "https://ipv4_cu.itdog.cn/");
+        spawn_plain!(c4,  true,  IpFamily::V4, "https://ip.3322.net/");
+        spawn_ipip!( c4,  true,  IpFamily::V4, "https://myip.ipip.net/json");
         // Global v4
-        spawn_plain!(c4, "icanhazip-v4", false, IpFamily::V4, "https://ipv4.icanhazip.com/");
-        spawn_ipify!(c4, "ipify-v4",     false, IpFamily::V4, "https://api4.ipify.org/?format=json");
+        spawn_plain!(c4, false, IpFamily::V4, "https://ipv4.icanhazip.com/");
+        spawn_ipify!(c4, false, IpFamily::V4, "https://api4.ipify.org/?format=json");
     }
 
     // CN v6 (using the force-IPv6 client; when a proxy is present the proxy determines the egress)
     if let Some(ref c6) = client_v6 {
-        spawn_plain!(c6, "itdog-v6-ct",  true,  IpFamily::V6, "https://ipv6_ct.itdog.cn/");
-        spawn_plain!(c6, "6.ipw.cn",     true,  IpFamily::V6, "https://6.ipw.cn/");
+        spawn_plain!(c6,  true,  IpFamily::V6, "https://ipv6_ct.itdog.cn/");
+        spawn_plain!(c6,  true,  IpFamily::V6, "https://6.ipw.cn/");
         // Global v6 — pure IPv6-only endpoint (domain resolves only to AAAA; proxy must support IPv6 egress)
-        spawn_plain!(c6, "icanhazip-v6", false, IpFamily::V6, "https://ipv6.icanhazip.com/");
-        spawn_ipify!(c6, "ipify-v6",     false, IpFamily::V6, "https://api6.ipify.org/?format=json");
-        spawn_plain!(c6, "ident-v6",     false, IpFamily::V6, "https://v6.ident.me/");
+        spawn_plain!(c6, false, IpFamily::V6, "https://ipv6.icanhazip.com/");
+        spawn_ipify!(c6, false, IpFamily::V6, "https://api6.ipify.org/?format=json");
+        spawn_plain!(c6, false, IpFamily::V6, "https://v6.ident.me/");
         // 6.ipw.cn/api/ip returns {"ip":"..."} JSON format, requires the ipify parser
-        spawn_ipify!(c6, "ipw-v6-api",   false, IpFamily::V6, "https://6.ipw.cn/api/ip");
-        spawn_ipify!(c6, "api64-ipify",  false, IpFamily::V6, "https://api64.ipify.org/?format=json");
+        spawn_ipify!(c6, false, IpFamily::V6, "https://6.ipw.cn/api/ip");
+        spawn_ipify!(c6, false, IpFamily::V6, "https://api64.ipify.org/?format=json");
     }
 
     let mut samples = Vec::new();

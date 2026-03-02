@@ -75,9 +75,8 @@ jobs:
           TARGET=${{ matrix.target }}
           STATIC=${{ matrix.static_name }}
           mkdir -p dist
-          cp "target/${TARGET}/release/${BIN}" dist/
-          tar -czf "dist/${BIN}-${TAG}-${TARGET}.tar.gz" -C dist "${BIN}"
-          cp "dist/${BIN}-${TAG}-${TARGET}.tar.gz" "dist/${STATIC}.tar.gz"
+          cp "target/${TARGET}/release/${BIN}" "dist/${BIN}-${TAG}-${TARGET}"
+          cp "dist/${BIN}-${TAG}-${TARGET}" "dist/${STATIC}"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -88,9 +87,8 @@ jobs:
           $TARGET = "${{ matrix.target }}"
           $STATIC = "${{ matrix.static_name }}"
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item "target/$TARGET/release/$BIN.exe" dist/
-          Compress-Archive -Path "dist/$BIN.exe" -DestinationPath "dist/$BIN-$TAG-$TARGET.zip"
-          Copy-Item "dist/$BIN-$TAG-$TARGET.zip" "dist/$STATIC.zip"
+          Copy-Item "target/$TARGET/release/$BIN.exe" "dist/$BIN-$TAG-$TARGET.exe"
+          Copy-Item "dist/$BIN-$TAG-$TARGET.exe" "dist/$STATIC.exe"
 
       - uses: actions/upload-artifact@v4
         with:

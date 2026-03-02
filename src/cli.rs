@@ -3,76 +3,214 @@ use clap::{Parser, Subcommand};
 use reqwest::Url;
 
 #[derive(Debug, Parser)]
-#[command(name = "netscope", about = "CDN speed test & connectivity probe (Apple / Cloudflare)")]
+#[command(
+    name = "netscope",
+    about = "CDN speed test & connectivity probe (Apple / Cloudflare)",
+    long_about = "CDN speed test & connectivity probe.\n\
+                  Measures latency, download and upload speed via Apple CDN or Cloudflare,\n\
+                  with multi-path testing (v4-CN / v4-Global / v6-CN / v6-Global)\n\
+                  and connectivity probing for 70+ sites across 11 categories.\n\
+                  \n\
+                  Without a subcommand, runs full speed test (latency + download + upload).",
+)]
 pub struct Cli {
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "CC",
+        help = "Force routing country for CDN node selection (e.g. CN, HK, SG, US).\n\
+                When set to CN, uses mainland China DoH resolvers (AliDNS / DNSPod / 360DNS)\n\
+                and tests both CN and Global paths separately.\n\
+                Auto-detected from egress IP if not specified."
+    )]
     pub country: Option<String>,
-    #[arg(long)]
+
+    #[arg(
+        long,
+        value_name = "URL",
+        help = "Proxy URL for all requests.\n\
+                Supported schemes: http, https, socks5, socks5h.\n\
+                Example: --proxy socks5://127.0.0.1:1080\n\
+                CN-side paths always bypass the proxy to reach mainland resolvers directly."
+    )]
     pub proxy: Option<String>,
-    #[arg(long, default_value_t = 8)]
+
+    #[arg(
+        long,
+        default_value_t = 8,
+        value_name = "SECS",
+        help = "Per-request timeout in seconds (default: 8).\n\
+                Applies to DNS, ping, download and upload requests individually.\n\
+                Increase on slow or high-latency connections."
+    )]
     pub timeout: u64,
-    #[arg(long)]
+
+    #[arg(
+        long,
+        help = "Output results as JSON to stdout instead of the interactive TUI.\n\
+                Progress messages are written to stderr.\n\
+                Useful for scripting, CI, or piping into jq."
+    )]
     pub json: bool,
-    #[arg(long)]
+
+    #[arg(
+        long,
+        requires = "json",
+        help = "Print extra diagnostic fields in JSON output (requires --json).\n\
+                Adds per-path candidate IP details and DNS resolver sources.\n\
+                Cannot be combined with TUI mode (i.e. requires --json)."
+    )]
     pub verbose: bool,
+
     #[arg(
         long,
         default_value = "apple",
         value_parser = ["apple", "cloudflare"],
-        help = "Speed test backend: apple (default, better for China) or cloudflare"
+        help = "Speed test backend (default: apple).\n\
+                  apple      — Apple CDN (mensura.cdn-apple.com). Uses DoH-based IP selection\n\
+                               and IP pinning. Optimised for detecting mainland China routing.\n\
+                  cloudflare — Cloudflare (speed.cloudflare.com). Direct connection,\n\
+                               no IP pinning. Suitable for general global speed tests."
     )]
     pub backend: String,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
+    /// Measure latency only (HTTP RTT + TCP connect time).
     Ping {
-        #[arg(long, default_value_t = 8)]
+        #[arg(
+            long,
+            default_value_t = 8,
+            value_name = "N",
+            help = "Number of ping requests per path (default: 8).\n\
+                    More samples give a more accurate median and jitter reading."
+        )]
         count: u32,
     },
+
+    /// Measure download speed only.
     Download {
-        #[arg(long, default_value_t = 20)]
+        #[arg(
+            long,
+            default_value_t = 20,
+            value_name = "SECS",
+            help = "Total download test duration in seconds (default: 20).\n\
+                    The test runs multiple stages (single-stream → multi-stream)\n\
+                    and reports the best result."
+        )]
         duration: u64,
     },
+
+    /// Measure upload speed only.
     Upload {
-        #[arg(long, default_value_t = 16)]
+        #[arg(
+            long,
+            default_value_t = 16,
+            value_name = "MiB",
+            help = "Payload size per upload request in MiB (default: 16).\n\
+                    Larger values yield more accurate throughput on fast connections.\n\
+                    Cloudflare backend is capped at 4 MiB due to server-side limits."
+        )]
         ul_mib: u64,
-        #[arg(long, default_value_t = 3)]
+        #[arg(
+            long,
+            default_value_t = 3,
+            value_name = "N",
+            help = "Number of upload repetitions (default: 3).\n\
+                    The median result is reported."
+        )]
         ul_repeat: u32,
     },
+
+    /// Full speed test: latency + download + upload (default when no subcommand given).
+    ///
+    /// Also runs a connectivity probe after the speed test completes.
     Full {
-        #[arg(long, default_value_t = 8)]
+        #[arg(
+            long,
+            default_value_t = 8,
+            value_name = "N",
+            help = "Number of ping requests per path (default: 8)."
+        )]
         count: u32,
-        #[arg(long, default_value_t = 20)]
+        #[arg(
+            long,
+            default_value_t = 20,
+            value_name = "SECS",
+            help = "Download test duration in seconds (default: 20)."
+        )]
         duration: u64,
-        #[arg(long, default_value_t = 16)]
+        #[arg(
+            long,
+            default_value_t = 16,
+            value_name = "MiB",
+            help = "Upload payload size per request in MiB (default: 16)."
+        )]
         ul_mib: u64,
-        #[arg(long, default_value_t = 3)]
+        #[arg(
+            long,
+            default_value_t = 3,
+            value_name = "N",
+            help = "Number of upload repetitions (default: 3)."
+        )]
         ul_repeat: u32,
     },
+
+    /// Probe connectivity to 70+ sites without running a speed test.
+    ///
+    /// Tests reachability and TTFB latency across 11 categories:
+    /// ai, social, streaming, search, news, game, dev, cloud, crypto, nsfw, cn.
     Probe {
-        #[arg(long, default_value_t = 6)]
+        #[arg(
+            long,
+            default_value_t = 6,
+            value_name = "N",
+            help = "Number of concurrent probe requests (default: 6).\n\
+                    Higher values finish faster but may trigger rate limiting."
+        )]
         concurrency: usize,
-        #[arg(long, default_value_t = 10)]
+        #[arg(
+            long,
+            default_value_t = 10,
+            value_name = "SECS",
+            help = "Per-site request timeout in seconds (default: 10)."
+        )]
         probe_timeout: u64,
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "LIST",
+            help = "Comma-separated list of categories to probe.\n\
+                    Available: ai, social, streaming, search, news, game, dev, cloud, crypto, nsfw, cn\n\
+                    Example: --category ai,social,streaming"
+        )]
         category: Option<String>,
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "KEYWORD",
+            help = "Filter sites by name keyword (case-insensitive substring match).\n\
+                    Example: --site github"
+        )]
         site: Option<String>,
-        #[arg(long, default_value_t = false)]
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Skip GeoIP location lookup for each site.\n\
+                    Speeds up probing but omits country information from results."
+        )]
         skip_geo: bool,
     },
 }
 
 pub fn command_name(command: &Command) -> &'static str {
     match command {
-        Command::Ping { .. } => "ping",
+        Command::Ping { .. }     => "ping",
         Command::Download { .. } => "download",
-        Command::Upload { .. } => "upload",
-        Command::Full { .. } => "full",
-        Command::Probe { .. } => "probe",
+        Command::Upload { .. }   => "upload",
+        Command::Full { .. }     => "full",
+        Command::Probe { .. }    => "probe",
     }
 }
 

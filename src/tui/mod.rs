@@ -44,20 +44,17 @@ pub fn init_channel() -> mpsc::UnboundedReceiver<Event> {
 pub fn run_tui_loop(
     mut rx: mpsc::UnboundedReceiver<Event>,
     mode: String,
-    target: String,
-    timeout: u64,
     proxy: Option<String>,
     backend: String,
     abort_handle: tokio::task::AbortHandle,
 ) -> io::Result<()> {
-    let backend_name = backend;
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let cb      = CrosstermBackend::new(stdout);
     let mut term = Terminal::new(cb)?;
 
-    let mut state = AppState::new(&mode, &target, timeout, proxy, backend_name);
+    let mut state = AppState::new(&mode, proxy, backend);
     let tick_ms   = Duration::from_millis(80);
     // Result-page cooldown frames: after finished, at least this many frames must render
     // before accepting an exit keypress, to avoid consuming a leftover Enter key from the CLI.
@@ -156,11 +153,6 @@ fn apply_event(state: &mut AppState, ev: Event) {
                 "upload"   => state.upload_status   = status,
                 _ => {}
             }
-        }
-        Event::DownloadStage { name, concurrency, chunk_mib, secs, mbps } => {
-            state.download_stages.push(crate::tui::state::DownloadStageRow {
-                name, concurrency, chunk_mib, secs, mbps,
-            });
         }
         Event::PathsInit { paths } => {
             state.paths = paths;

@@ -89,8 +89,8 @@ pub fn speed_stats_from_samples(mut samples: Vec<f64>) -> SpeedStats {
     if samples.is_empty() {
         return SpeedStats::default();
     }
+    // iqr_trim sorts internally; no second sort needed
     iqr_trim(&mut samples);
-    samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
 
     let min_mbps = samples.first().copied().unwrap_or(0.0);
     let max_mbps = samples.last().copied().unwrap_or(0.0);
