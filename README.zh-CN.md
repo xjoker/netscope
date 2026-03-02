@@ -24,17 +24,38 @@
 
 ## 安装
 
-### 下载预编译二进制
+### 一行命令安装（最新版本）
 
-从 [Releases](https://github.com/xjoker/netscope/releases) 页面下载：
+**macOS — Apple Silicon（M1/M2/M3）**
+```bash
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-macos-aarch64.tar.gz | tar -xz && sudo mv netscope /usr/local/bin/
+```
 
-| 平台 | 文件 |
-|------|------|
-| Linux x86_64（musl 静态链接） | `netscope-*-x86_64-unknown-linux-musl.tar.gz` |
-| Linux aarch64（musl 静态链接） | `netscope-*-aarch64-unknown-linux-musl.tar.gz` |
-| macOS Intel | `netscope-*-x86_64-apple-darwin.tar.gz` |
-| macOS Apple Silicon | `netscope-*-aarch64-apple-darwin.tar.gz` |
-| Windows x86_64 | `netscope-*-x86_64-pc-windows-msvc.zip` |
+**macOS — Intel**
+```bash
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-macos-x86_64.tar.gz | tar -xz && sudo mv netscope /usr/local/bin/
+```
+
+**Linux — x86_64**
+```bash
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-x86_64.tar.gz | tar -xz && sudo mv netscope /usr/local/bin/
+```
+
+**Linux — aarch64**
+```bash
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-aarch64.tar.gz | tar -xz && sudo mv netscope /usr/local/bin/
+```
+
+**Windows — PowerShell**
+```powershell
+irm https://github.com/xjoker/netscope/releases/latest/download/netscope-windows-x86_64.zip -OutFile netscope.zip; Expand-Archive netscope.zip .; .\netscope.exe
+```
+
+安装完成后可直接在终端运行 `netscope`。
+
+### 下载历史版本
+
+浏览所有版本：[github.com/xjoker/netscope/releases](https://github.com/xjoker/netscope/releases)
 
 ### 从源码构建
 

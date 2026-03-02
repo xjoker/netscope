@@ -17,18 +17,23 @@ jobs:
         include:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-musl
+            static_name: netscope-linux-x86_64
             cross: false
           - os: ubuntu-22.04
             target: aarch64-unknown-linux-musl
+            static_name: netscope-linux-aarch64
             cross: true
-          - os: macos-13
+          - os: macos-12
             target: x86_64-apple-darwin
+            static_name: netscope-macos-x86_64
             cross: false
           - os: macos-latest
             target: aarch64-apple-darwin
+            static_name: netscope-macos-aarch64
             cross: false
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            static_name: netscope-windows-x86_64
             cross: false
 
     steps:
@@ -37,6 +42,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Install musl-tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
@@ -47,13 +56,13 @@ jobs:
         run: cargo install cross --locked
 
       - name: Build
+        shell: bash
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }}
           else
             cargo build --release --target ${{ matrix.target }}
           fi
-        shell: bash
 
       - name: Package
         shell: bash
@@ -61,25 +70,25 @@ jobs:
           TAG=${GITHUB_REF_NAME}
           BIN=netscope
           TARGET=${{ matrix.target }}
-          DIR="dist/${BIN}-${TAG}-${TARGET}"
-          mkdir -p "$DIR"
+          STATIC=${{ matrix.static_name }}
+          mkdir -p dist
 
           if [[ "$TARGET" == *windows* ]]; then
-            cp "target/${TARGET}/release/${BIN}.exe" "$DIR/"
-            ARCHIVE="${DIR}.zip"
-            cd dist && zip -r "../${ARCHIVE}" "${BIN}-${TAG}-${TARGET}" && cd ..
+            cp "target/${TARGET}/release/${BIN}.exe" dist/
+            cd dist
+            zip "${BIN}-${TAG}-${TARGET}.zip" "${BIN}.exe"
+            cp "${BIN}-${TAG}-${TARGET}.zip" "${STATIC}.zip"
+            cd ..
           else
-            cp "target/${TARGET}/release/${BIN}" "$DIR/"
-            ARCHIVE="${DIR}.tar.gz"
-            tar -czf "${ARCHIVE}" -C dist "${BIN}-${TAG}-${TARGET}"
+            cp "target/${TARGET}/release/${BIN}" dist/
+            tar -czf "dist/${BIN}-${TAG}-${TARGET}.tar.gz" -C dist "${BIN}"
+            cp "dist/${BIN}-${TAG}-${TARGET}.tar.gz" "dist/${STATIC}.tar.gz"
           fi
-
-          echo "ARCHIVE=${ARCHIVE}" >> $GITHUB_ENV
 
       - uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.target }}
-          path: ${{ env.ARCHIVE }}
+          path: dist/netscope-*
           retention-days: 1
 
   release:

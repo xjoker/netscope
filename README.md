@@ -24,17 +24,38 @@
 
 ## Installation
 
-### Pre-built binaries
+### One-line install (latest release)
 
-Download from [Releases](https://github.com/xjoker/netscope/releases):
+**macOS — Apple Silicon (M1/M2/M3)**
+```bash
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-macos-aarch64.tar.gz | tar -xz && sudo mv netscope /usr/local/bin/
+```
 
-| Platform | File |
-|----------|------|
-| Linux x86_64 (musl, static) | `netscope-*-x86_64-unknown-linux-musl.tar.gz` |
-| Linux aarch64 (musl, static) | `netscope-*-aarch64-unknown-linux-musl.tar.gz` |
-| macOS Intel | `netscope-*-x86_64-apple-darwin.tar.gz` |
-| macOS Apple Silicon | `netscope-*-aarch64-apple-darwin.tar.gz` |
-| Windows x86_64 | `netscope-*-x86_64-pc-windows-msvc.zip` |
+**macOS — Intel**
+```bash
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-macos-x86_64.tar.gz | tar -xz && sudo mv netscope /usr/local/bin/
+```
+
+**Linux — x86_64**
+```bash
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-x86_64.tar.gz | tar -xz && sudo mv netscope /usr/local/bin/
+```
+
+**Linux — aarch64**
+```bash
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-aarch64.tar.gz | tar -xz && sudo mv netscope /usr/local/bin/
+```
+
+**Windows — PowerShell**
+```powershell
+irm https://github.com/xjoker/netscope/releases/latest/download/netscope-windows-x86_64.zip -OutFile netscope.zip; Expand-Archive netscope.zip .; .\netscope.exe
+```
+
+After install, run `netscope` directly from any terminal.
+
+### Download versioned release
+
+Browse all releases at [github.com/xjoker/netscope/releases](https://github.com/xjoker/netscope/releases).
 
 ### Build from source
 
