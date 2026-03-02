@@ -310,7 +310,7 @@ pub async fn run(cli: crate::cli::Cli) -> Result<(Report, u8)> {
 
     // For Cloudflare backend, skip DoH DNS resolution and IP selection.
     // Build a plain client and set target_host to speed.cloudflare.com.
-    let (client, selected_ip_str, selected_family_str, selected_source, target_host) =
+    let (client, _selected_ip_str, _selected_family_str, selected_source, target_host) =
         if backend == SpeedBackend::Cloudflare {
             let cf_client = build_cloudflare_client(cli_timeout, proxy)?;
             (
