@@ -111,7 +111,7 @@ fn draw_header(f: &mut Frame, area: Rect, state: &AppState) {
     let title_line = Line::from(vec![
         Span::raw(" "),
         white_bold("netscope"),
-        dim(format!("  v{ver}")),
+        dim(format!("  {ver}")),
         Span::raw("   "),
         Span::styled(&badge_text, Style::default().fg(Color::Black).bg(badge_col).add_modifier(Modifier::BOLD)),
         if let Some((txt, col)) = cn_badge {
@@ -397,13 +397,16 @@ fn draw_multipath_progress(f: &mut Frame, area: Rect, state: &AppState) {
     let width = inner.width as usize;
     let mut lines: Vec<Line> = vec![];
 
-    // Header: Path(10) Status(16) CDN Node(22) Ping/TCP(16) Download(14) Upload(10)
+    // Header: Path(10) Status(16) CDN Node(dynamic) Ping/TCP(16) Download(14) Upload(10)
+    // CDN Node column takes remaining width after fixed columns
+    let fixed_cols = 10 + 16 + 16 + 14 + 10 + 10; // fixed columns + separators (5×2)
+    let cdn_w = (width.saturating_sub(fixed_cols)).max(22);
     let hdr = format!(
-        "{:<10}  {:<16}  {:<22}  {:>16}  {:>14}  {:>10}",
+        "{:<10}  {:<16}  {:<cdn_w$}  {:>16}  {:>14}  {:>10}",
         "Path", "Status", "CDN Node", "Ping/TCP", "Download", "Upload"
     );
     lines.push(Line::from(vec![dim(hdr)]));
-    lines.push(Line::from(vec![dim("─".repeat(width.min(98)))]));
+    lines.push(Line::from(vec![dim("─".repeat(width))]));
 
     for row in &state.paths {
         let (status_span, pid_col) = if row.done && row.current_stage == "merged" {
@@ -429,23 +432,23 @@ fn draw_multipath_progress(f: &mut Frame, area: Rect, state: &AppState) {
             )
         };
 
-        // CDN Node: IP(max15) + abbreviated city
+        // CDN Node: IP + abbreviated city, dynamic width
         let cdn_raw = match (&row.cdn_ip, &row.cdn_location) {
             (Some(ip), Some(loc)) => format!("{} {}", ip, shorten_geo(loc)),
             (Some(ip), None)      => ip.clone(),
             _ => if row.done && row.error.is_some() {
-                row.error.as_deref().unwrap_or("err").chars().take(22).collect()
+                row.error.as_deref().unwrap_or("err").chars().take(cdn_w).collect()
             } else {
                 "...".to_string()
             }
         };
-        let cdn_truncated: String = cdn_raw.chars().take(22).collect();
+        let cdn_truncated: String = cdn_raw.chars().take(cdn_w).collect();
         let cdn_span = if row.cdn_ip.is_some() {
-            Span::styled(format!("{:<22}", cdn_truncated), Style::default().fg(Color::White))
+            Span::styled(format!("{:<cdn_w$}", cdn_truncated), Style::default().fg(Color::White))
         } else if row.done && row.error.is_some() {
-            Span::styled(format!("{:<22}", cdn_truncated), Style::default().fg(Color::Red))
+            Span::styled(format!("{:<cdn_w$}", cdn_truncated), Style::default().fg(Color::Red))
         } else {
-            dim(format!("{:<22}", cdn_truncated))
+            dim(format!("{:<cdn_w$}", cdn_truncated))
         };
 
         // Ping/TCP column (16 chars): show HTTP RTT and TCP RTT
@@ -664,9 +667,9 @@ pub fn draw_result_table(f: &mut Frame, state: &AppState) {
     // Footer
     let code = state.exit_code;
     let (ec_col, ec_text) = if code == 0 {
-        (Color::Green,  format!("✓  done  Exit {code}   Tab: switch panel  ↑↓/jk: scroll  q: quit"))
+        (Color::Green,  format!("✓  done  Exit {code}   Tab: switch panel  r: retest  ↑↓/jk: scroll  q: quit"))
     } else {
-        (Color::Yellow, format!("⚠  partial  Exit {code}   Tab: switch panel  ↑↓/jk: scroll  q: quit"))
+        (Color::Yellow, format!("⚠  partial  Exit {code}   Tab: switch panel  r: retest  ↑↓/jk: scroll  q: quit"))
     };
     let footer_block = Block::default()
         .borders(Borders::ALL)
@@ -680,6 +683,7 @@ pub fn draw_result_table(f: &mut Frame, state: &AppState) {
 
 fn draw_result_body(f: &mut Frame, area: Rect, state: &AppState, report: &crate::report::Report) {
     let inner_h = area.height.saturating_sub(2) as usize; // subtract borders
+    let result_width = area.width.saturating_sub(4) as usize; // subtract borders + padding
 
     // Build lines first so we know total count before rendering the block
     let mut lines: Vec<Line> = vec![];
@@ -711,19 +715,21 @@ fn draw_result_body(f: &mut Frame, area: Rect, state: &AppState, report: &crate:
             lines.push(Line::from(vec![]));
         }
 
-        // Header: Path(9) CDN IP(16) Location(24) Ping(8) TCP(8) Download(11) Upload(11)
+        // Header: Path(9) CDN IP(16) Location(dynamic) Ping(8) TCP(7) Download(11) Upload(11)
+        let res_fixed = 9 + 16 + 8 + 7 + 11 + 11 + 12; // fixed columns + separators (6×2)
+        let loc_w = (result_width.saturating_sub(res_fixed)).max(24);
         lines.push(Line::from(vec![dim(format!(
-            "{:<9}  {:<16}  {:<24}  {:>8}  {:>7}  {:>11}  {:>11}",
+            "{:<9}  {:<16}  {:<loc_w$}  {:>8}  {:>7}  {:>11}  {:>11}",
             "Path", "CDN IP", "Location", "HTTP-RTT", "TCP-RTT", "Download", "Upload"
         ))]));
-        lines.push(Line::from(vec![dim("─".repeat(95))]));
+        lines.push(Line::from(vec![dim("─".repeat(result_width))]));
 
         for path in &report.paths {
             let cdn_ip_s: String = path.cdn_ip.as_deref().unwrap_or("-").chars().take(16).collect();
             let location_s: String = path.cdn_location.as_deref()
                 .map(shorten_geo)
                 .unwrap_or_else(|| "-".to_string())
-                .chars().take(24).collect();
+                .chars().take(loc_w).collect();
 
             let dl_s = path.download_mbps
                 .map(|v| format!("{v:>8.2}Mbps"))
@@ -737,7 +743,7 @@ fn draw_result_body(f: &mut Frame, area: Rect, state: &AppState, report: &crate:
             let (pid_span, ip_span, loc_span, ping_span, tcp_span, dl_span, ul_span) = if has_err {
                 (red(format!("{:<9}", path.path_id)),
                  red(format!("{:<16}", cdn_ip_s)),
-                 dim(format!("{:<24}", location_s)),
+                 dim(format!("{:<loc_w$}", location_s)),
                  dim(format!("{:>8}", "-")),
                  dim(format!("{:>7}", "-")),
                  red(format!("{:>11}", "✗")),
@@ -752,7 +758,7 @@ fn draw_result_body(f: &mut Frame, area: Rect, state: &AppState, report: &crate:
                     .unwrap_or_else(|| dim(format!("{:>7}", "-")));
                 (cyan_bold(format!("{:<9}", path.path_id)),
                  Span::styled(format!("{:<16}", cdn_ip_s), Style::default().fg(Color::White)),
-                 green(format!("{:<24}", location_s)),
+                 green(format!("{:<loc_w$}", location_s)),
                  ping_span,
                  tcp_span,
                  Span::styled(dl_s.clone(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),

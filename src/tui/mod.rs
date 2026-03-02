@@ -16,7 +16,7 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
 use crate::tui::render::{draw, draw_result_table};
-use crate::tui::state::{AppState, Event, ResultFocus, StageStatus};
+use crate::tui::state::{AppState, Event, ResultFocus, RetestCmd, StageStatus};
 
 /// Global sender — output.rs uses this to send events without passing it as a parameter
 static TX: OnceLock<mpsc::UnboundedSender<Event>> = OnceLock::new();
@@ -41,12 +41,15 @@ pub fn init_channel() -> mpsc::UnboundedReceiver<Event> {
 
 /// Start the TUI rendering loop, blocking until the task finishes and the user confirms exit.
 /// Must be called on a dedicated OS thread (not a tokio thread) because crossterm event polling is synchronous.
+///
+/// `retest_tx` sends retest commands back to main thread when user presses R/r on the result page.
 pub fn run_tui_loop(
     mut rx: mpsc::UnboundedReceiver<Event>,
     mode: String,
     proxy: Option<String>,
     backend: String,
     abort_handle: tokio::task::AbortHandle,
+    retest_tx: std::sync::mpsc::Sender<RetestCmd>,
 ) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -96,6 +99,33 @@ pub fn run_tui_loop(
                             ResultFocus::Speed        => ResultFocus::Connectivity,
                             ResultFocus::Connectivity => ResultFocus::Speed,
                         };
+                    }
+                    // R/r: retest the focused panel (result page only)
+                    KeyCode::Char('r') | KeyCode::Char('R') if state.finished && !state.retesting => {
+                        let cmd = match state.result_focus {
+                            ResultFocus::Speed => {
+                                // Reset speed-related state
+                                state.finished = false;
+                                state.retesting = true;
+                                state.final_report = None;
+                                state.paths.clear();
+                                state.scroll_speed = 0;
+                                state.ping_status = StageStatus::Waiting;
+                                state.download_status = StageStatus::Waiting;
+                                state.upload_status = StageStatus::Waiting;
+                                result_cooldown = 0;
+                                RetestCmd::Speed
+                            }
+                            ResultFocus::Connectivity => {
+                                // Reset probe-related state
+                                state.probe_results.clear();
+                                state.probe_progress = Some((0, 0));
+                                state.scroll_conn = 0;
+                                state.retesting = true;
+                                RetestCmd::Probe
+                            }
+                        };
+                        let _ = retest_tx.send(cmd);
                     }
                     // Scroll down in focused panel
                     KeyCode::Down | KeyCode::Char('j') if state.finished => {
@@ -178,6 +208,7 @@ fn apply_event(state: &mut AppState, ev: Event) {
             state.exit_code    = code;
             state.final_report = Some(report);
             state.finished     = true;
+            state.retesting    = false;
             // Sync stage statuses to their final values (in case runner never sent StageUpdate Done)
             if !state.ping_status.is_done() {
                 state.ping_status = StageStatus::Waiting;
@@ -192,12 +223,14 @@ fn apply_event(state: &mut AppState, ev: Event) {
         Event::ProbeDone { results } => {
             state.probe_results = results;
             state.probe_progress = None;
+            state.retesting = false;
         }
         Event::ProbeProgress { done, total } => {
             state.probe_progress = Some((done, total));
         }
         Event::Fatal(msg) => {
             state.finished     = true;
+            state.retesting    = false;
             state.exit_code    = 2;
             state.ping_status  = StageStatus::Fail(msg.clone());
         }

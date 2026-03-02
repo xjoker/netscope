@@ -1,5 +1,12 @@
 use crate::report::Report;
 
+/// Command sent from TUI back to main thread to trigger a retest
+#[derive(Debug, Clone, Copy)]
+pub enum RetestCmd {
+    Speed,
+    Probe,
+}
+
 /// Status of each stage
 #[derive(Debug, Clone, PartialEq)]
 pub enum StageStatus {
@@ -145,6 +152,8 @@ pub struct AppState {
     pub result_focus: ResultFocus,
     pub scroll_speed: u16,
     pub scroll_conn: u16,
+    /// Whether a retest is currently in progress
+    pub retesting: bool,
 }
 
 impl AppState {
@@ -186,6 +195,7 @@ impl AppState {
             result_focus: ResultFocus::Speed,
             scroll_speed: 0,
             scroll_conn: 0,
+            retesting: false,
         }
     }
 }

@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 use reqwest::Url;
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone, Parser)]
 #[command(
     name = "netscope",
     about = "CDN speed test & connectivity probe (Apple / Cloudflare)",

@@ -18,6 +18,7 @@ use crate::probe::types::ProbeReport;
 use crate::probe::{output_probe_report, run_probe};
 use crate::report::output_report;
 use crate::speed::runner::run;
+use crate::tui::state::RetestCmd;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -131,16 +132,20 @@ async fn main() -> ExitCode {
         let tui_proxy   = cli.proxy.clone();
         let tui_backend = cli.backend.clone();
 
+        // Retest channel: TUI → main thread
+        let (retest_tx, retest_rx) = std::sync::mpsc::channel::<RetestCmd>();
+
         // Wrap the speed-test task inside a tokio task so the TUI can abort it immediately on q
-        let speed_task = tokio::task::spawn(async move { run(cli).await });
+        let cli_clone = cli.clone();
+        let speed_task = tokio::task::spawn(async move { run(cli_clone).await });
         let abort_handle = speed_task.abort_handle();
 
         // Launch the TUI rendering loop on a dedicated OS thread (crossterm event polling is synchronous/blocking)
         let tui_handle = std::thread::spawn(move || {
-            tui::run_tui_loop(rx, tui_mode, tui_proxy, tui_backend, abort_handle)
+            tui::run_tui_loop(rx, tui_mode, tui_proxy, tui_backend, abort_handle, retest_tx)
         });
 
-        let exit_code = match speed_task.await {
+        let mut exit_code = match speed_task.await {
             Ok(Ok((report, code))) => {
                 tui::send(crate::tui::state::Event::Done {
                     report: Box::new(report),
@@ -159,6 +164,34 @@ async fn main() -> ExitCode {
                 2
             }
         };
+
+        // Retest loop: wait for retest commands from TUI
+        while let Ok(cmd) = retest_rx.recv() {
+            match cmd {
+                RetestCmd::Speed => {
+                    let cli_clone = cli.clone();
+                    match run(cli_clone).await {
+                        Ok((report, code)) => {
+                            exit_code = code;
+                            tui::send(crate::tui::state::Event::Done {
+                                report: Box::new(report),
+                                code,
+                            });
+                        }
+                        Err(err) => {
+                            tui::send(crate::tui::state::Event::Fatal(format!("{err:#}")));
+                            exit_code = 2;
+                        }
+                    }
+                }
+                RetestCmd::Probe => {
+                    let proxy = cli.proxy.as_deref();
+                    let targets = all_targets();
+                    let results = run_probe(targets, 8, 10, proxy, false).await;
+                    tui::send(crate::tui::state::Event::ProbeDone { results });
+                }
+            }
+        }
 
         // Wait for the TUI thread to exit (user confirms with a keypress)
         let _ = tui_handle.join();

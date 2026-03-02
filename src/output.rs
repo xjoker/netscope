@@ -99,9 +99,9 @@ pub fn emit_start_banner(is_json: bool, mode: &str, base_url: &Url, timeout: u64
     box_top(&c);
 
     // Title row
-    let title_raw  = format!("netscope  v{ver}");
+    let title_raw  = format!("netscope  {ver}");
     let mode_raw   = format!("mode: {mode}");
-    let title_col  = format!("{}{}netscope{} {}{}v{ver}{}", c.bold, c.white, c.reset, c.dim, c.cyan, c.reset);
+    let title_col  = format!("{}{}netscope{} {}{}{ver}{}", c.bold, c.white, c.reset, c.dim, c.cyan, c.reset);
     let mode_col   = format!("{}mode: {}{}{mode}{}", c.dim, c.reset, c.cyan, c.reset);
     let inner_raw  = format!("{title_raw}  {mode_raw}");
     let inner_col  = format!("{title_col}  {mode_col}");
