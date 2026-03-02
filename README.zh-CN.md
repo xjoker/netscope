@@ -26,38 +26,37 @@
 
 ## 安装
 
-根据平台选择对应的二进制文件：
+### 一键运行
+
+**Linux x86_64**
+```bash
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-x86_64 -o netscope && chmod +x netscope && ./netscope
+```
+
+**macOS Apple Silicon（M1/M2/M3）**
+```bash
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-macos-aarch64 -o netscope && chmod +x netscope && ./netscope
+```
+
+**Windows PowerShell**
+```powershell
+irm https://github.com/xjoker/netscope/releases/latest/download/netscope-windows-x86_64.exe -OutFile netscope.exe; .\netscope.exe
+```
+
+### 安装到系统
+
+```bash
+# macOS / Linux — 将 <BINARY> 替换为下表中的文件名
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/<BINARY> -o netscope && chmod +x netscope && sudo mv netscope /usr/local/bin/
+```
 
 | 平台 | 文件名 |
 |------|--------|
-| macOS Apple Silicon（M1/M2/M3） | `netscope-macos-aarch64` |
+| macOS Apple Silicon | `netscope-macos-aarch64` |
 | macOS Intel | `netscope-macos-x86_64` |
 | Linux x86_64 | `netscope-linux-x86_64` |
 | Linux aarch64 | `netscope-linux-aarch64` |
 | Windows x86_64 | `netscope-windows-x86_64.exe` |
-
-将下方命令中的 `<BINARY>` 替换为上表中的文件名。
-
-**临时运行（macOS / Linux）**
-```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/<BINARY> -o netscope && chmod +x netscope && ./netscope
-```
-
-**安装到系统（macOS / Linux）**
-```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/<BINARY> -o netscope && chmod +x netscope && sudo mv netscope /usr/local/bin/
-```
-
-**Windows — PowerShell**
-```powershell
-# 临时运行
-irm https://github.com/xjoker/netscope/releases/latest/download/netscope-windows-x86_64.exe -OutFile netscope.exe; .\netscope.exe
-
-# 安装到系统
-New-Item -ItemType Directory -Force -Path "$env:ProgramFiles\netscope" | Out-Null
-Move-Item -Force netscope.exe "$env:ProgramFiles\netscope\"
-[Environment]::SetEnvironmentVariable("PATH", $env:PATH + ";$env:ProgramFiles\netscope", "User")
-```
 
 ### 中国大陆加速下载
 
@@ -103,19 +102,19 @@ netscope --proxy socks5://127.0.0.1:1080
 netscope [选项] [子命令]
 
 子命令:
-  ping      仅测延迟
+  ping      仅测延迟（HTTP RTT + TCP 建连时间）
   download  仅测下载速度
   upload    仅测上传速度
   full      完整测速：延迟 + 下载 + 上传 + 连通性探测  [默认]
   probe     连通性探测（不测速）
 
 选项:
-      --backend <后端>      apple | cloudflare  [默认: apple]
-      --country <国家码>    强制路由国家（如 CN）
-      --proxy <代理地址>    代理 URL（http/https/socks5/socks5h）
-      --timeout <秒>        单次请求超时秒数  [默认: 8]
-      --json                结果以 JSON 输出到 stdout（进度信息静默）
-      --verbose             输出各路径详细候选信息（需配合 --json）
+      --backend <BACKEND>    apple | cloudflare  [默认: apple]
+      --country <CC>         强制路由国家（如 CN、HK、SG、US）
+      --proxy <URL>          代理 URL（http/https/socks5/socks5h）
+      --timeout <SECS>       单次请求超时秒数  [默认: 8]
+      --json                 结果以 JSON 输出到 stdout（进度信息静默）
+      --verbose              输出各路径详细候选信息（需配合 --json）
 ```
 
 ### 子命令参数

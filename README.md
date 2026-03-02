@@ -26,38 +26,37 @@
 
 ## Installation
 
-Pick the binary for your platform:
+### Quick run
+
+**Linux x86_64**
+```bash
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-x86_64 -o netscope && chmod +x netscope && ./netscope
+```
+
+**macOS Apple Silicon (M1/M2/M3)**
+```bash
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-macos-aarch64 -o netscope && chmod +x netscope && ./netscope
+```
+
+**Windows PowerShell**
+```powershell
+irm https://github.com/xjoker/netscope/releases/latest/download/netscope-windows-x86_64.exe -OutFile netscope.exe; .\netscope.exe
+```
+
+### Install to system
+
+```bash
+# macOS / Linux — replace <BINARY> with the name from the table below
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/<BINARY> -o netscope && chmod +x netscope && sudo mv netscope /usr/local/bin/
+```
 
 | Platform | Binary name |
 |----------|-------------|
-| macOS Apple Silicon (M1/M2/M3) | `netscope-macos-aarch64` |
+| macOS Apple Silicon | `netscope-macos-aarch64` |
 | macOS Intel | `netscope-macos-x86_64` |
 | Linux x86_64 | `netscope-linux-x86_64` |
 | Linux aarch64 | `netscope-linux-aarch64` |
 | Windows x86_64 | `netscope-windows-x86_64.exe` |
-
-Replace `<BINARY>` below with the name from the table.
-
-**Quick run (macOS / Linux)**
-```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/<BINARY> -o netscope && chmod +x netscope && ./netscope
-```
-
-**Install to system (macOS / Linux)**
-```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/<BINARY> -o netscope && chmod +x netscope && sudo mv netscope /usr/local/bin/
-```
-
-**Windows — PowerShell**
-```powershell
-# Quick run
-irm https://github.com/xjoker/netscope/releases/latest/download/netscope-windows-x86_64.exe -OutFile netscope.exe; .\netscope.exe
-
-# Install to system
-New-Item -ItemType Directory -Force -Path "$env:ProgramFiles\netscope" | Out-Null
-Move-Item -Force netscope.exe "$env:ProgramFiles\netscope\"
-[Environment]::SetEnvironmentVariable("PATH", $env:PATH + ";$env:ProgramFiles\netscope", "User")
-```
 
 ### Other options
 
@@ -99,17 +98,17 @@ netscope --proxy socks5://127.0.0.1:1080
 netscope [OPTIONS] [COMMAND]
 
 Commands:
-  ping      Latency test only
-  download  Download speed test only
-  upload    Upload speed test only
-  full      Full test: ping + download + upload + connectivity probe  [default]
+  ping      Measure latency only (HTTP RTT + TCP connect time)
+  download  Measure download speed only
+  upload    Measure upload speed only
+  full      Full test: latency + download + upload + connectivity probe  [default]
   probe     Connectivity probe (no speed test)
 
 Options:
       --backend <BACKEND>    apple | cloudflare  [default: apple]
-      --country <COUNTRY>    Force routing country code (e.g. CN)
-      --proxy <PROXY>        Proxy URL (http/https/socks5/socks5h)
-      --timeout <TIMEOUT>    Per-request timeout in seconds  [default: 8]
+      --country <CC>         Force routing country code (e.g. CN, HK, SG, US)
+      --proxy <URL>          Proxy URL (http/https/socks5/socks5h)
+      --timeout <SECS>       Per-request timeout in seconds  [default: 8]
       --json                 Output JSON results to stdout (progress suppressed)
       --verbose              Include per-path candidate details in JSON output (requires --json)
 ```
