@@ -23,7 +23,7 @@ jobs:
             target: aarch64-unknown-linux-musl
             static_name: netscope-linux-aarch64
             cross: true
-          - os: macos-13
+          - os: macos-latest
             target: x86_64-apple-darwin
             static_name: netscope-macos-x86_64
             cross: false
