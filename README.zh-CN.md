@@ -26,111 +26,47 @@
 
 ## 安装
 
-### 临时运行（不安装）
+根据平台选择对应的二进制文件：
 
-下载后直接运行，不写入系统，用完即弃。
+| 平台 | 文件名 |
+|------|--------|
+| macOS Apple Silicon（M1/M2/M3） | `netscope-macos-aarch64` |
+| macOS Intel | `netscope-macos-x86_64` |
+| Linux x86_64 | `netscope-linux-x86_64` |
+| Linux aarch64 | `netscope-linux-aarch64` |
+| Windows x86_64 | `netscope-windows-x86_64.exe` |
 
-**macOS — Apple Silicon（M1/M2/M3）**
+将下方命令中的 `<BINARY>` 替换为上表中的文件名。
+
+**临时运行（macOS / Linux）**
 ```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-macos-aarch64 -o netscope && chmod +x netscope && ./netscope
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/<BINARY> -o netscope && chmod +x netscope && ./netscope
 ```
 
-**macOS — Intel**
+**安装到系统（macOS / Linux）**
 ```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-macos-x86_64 -o netscope && chmod +x netscope && ./netscope
-```
-
-**Linux — x86_64**
-```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-x86_64 -o netscope && chmod +x netscope && ./netscope
-```
-
-**Linux — aarch64**
-```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-aarch64 -o netscope && chmod +x netscope && ./netscope
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/<BINARY> -o netscope && chmod +x netscope && sudo mv netscope /usr/local/bin/
 ```
 
 **Windows — PowerShell**
 ```powershell
+# 临时运行
 irm https://github.com/xjoker/netscope/releases/latest/download/netscope-windows-x86_64.exe -OutFile netscope.exe; .\netscope.exe
-```
 
-### 安装到系统
-
-安装后可在任意终端直接使用 `netscope`。
-
-**macOS — Apple Silicon（M1/M2/M3）**
-```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-macos-aarch64 -o netscope && chmod +x netscope && sudo mv netscope /usr/local/bin/
-```
-
-**macOS — Intel**
-```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-macos-x86_64 -o netscope && chmod +x netscope && sudo mv netscope /usr/local/bin/
-```
-
-**Linux — x86_64**
-```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-x86_64 -o netscope && chmod +x netscope && sudo mv netscope /usr/local/bin/
-```
-
-**Linux — aarch64**
-```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-aarch64 -o netscope && chmod +x netscope && sudo mv netscope /usr/local/bin/
-```
-
-**Windows — PowerShell（安装到 `%ProgramFiles%\netscope`）**
-```powershell
-irm https://github.com/xjoker/netscope/releases/latest/download/netscope-windows-x86_64.exe -OutFile netscope.exe
+# 安装到系统
 New-Item -ItemType Directory -Force -Path "$env:ProgramFiles\netscope" | Out-Null
-Move-Item netscope.exe "$env:ProgramFiles\netscope\"
+Move-Item -Force netscope.exe "$env:ProgramFiles\netscope\"
 [Environment]::SetEnvironmentVariable("PATH", $env:PATH + ";$env:ProgramFiles\netscope", "User")
 ```
 
 ### 中国大陆加速下载
 
-> 如果 GitHub 访问较慢，可使用以下镜像加速地址（将命令中的 `https://github.com` 替换为 `https://gh.felicity.ac.cn/https://github.com`）。
+> GitHub 访问较慢时，将命令中的 `https://github.com` 替换为 `https://gh.felicity.ac.cn/https://github.com` 即可。
 
-**Linux — x86_64（一键运行）**
-```bash
-curl -fsSL https://gh.felicity.ac.cn/https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-x86_64 -o netscope && chmod +x netscope && ./netscope
-```
+### 其他方式
 
-**Linux — x86_64（安装到系统）**
-```bash
-curl -fsSL https://gh.felicity.ac.cn/https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-x86_64 -o netscope && chmod +x netscope && sudo mv netscope /usr/local/bin/
-```
-
-**Linux — aarch64（一键运行）**
-```bash
-curl -fsSL https://gh.felicity.ac.cn/https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-aarch64 -o netscope && chmod +x netscope && ./netscope
-```
-
-**Linux — aarch64（安装到系统）**
-```bash
-curl -fsSL https://gh.felicity.ac.cn/https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-aarch64 -o netscope && chmod +x netscope && sudo mv netscope /usr/local/bin/
-```
-
-**macOS — Apple Silicon（一键运行）**
-```bash
-curl -fsSL https://gh.felicity.ac.cn/https://github.com/xjoker/netscope/releases/latest/download/netscope-macos-aarch64 -o netscope && chmod +x netscope && ./netscope
-```
-
-**macOS — Intel（一键运行）**
-```bash
-curl -fsSL https://gh.felicity.ac.cn/https://github.com/xjoker/netscope/releases/latest/download/netscope-macos-x86_64 -o netscope && chmod +x netscope && ./netscope
-```
-
-### 下载历史版本
-
-浏览所有版本：[github.com/xjoker/netscope/releases](https://github.com/xjoker/netscope/releases)
-
-### 从源码构建
-
-```bash
-cargo build --release
-# 二进制位于：target/release/netscope
-```
+- 浏览所有版本：[github.com/xjoker/netscope/releases](https://github.com/xjoker/netscope/releases)
+- 从源码构建：`cargo build --release`（二进制位于 `target/release/netscope`）
 
 ---
 

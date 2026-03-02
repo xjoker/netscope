@@ -26,77 +26,43 @@
 
 ## Installation
 
-### Quick run (no install)
+Pick the binary for your platform:
 
-Try it once without installing — binary runs in the current directory and is discarded after.
+| Platform | Binary name |
+|----------|-------------|
+| macOS Apple Silicon (M1/M2/M3) | `netscope-macos-aarch64` |
+| macOS Intel | `netscope-macos-x86_64` |
+| Linux x86_64 | `netscope-linux-x86_64` |
+| Linux aarch64 | `netscope-linux-aarch64` |
+| Windows x86_64 | `netscope-windows-x86_64.exe` |
 
-**macOS — Apple Silicon (M1/M2/M3)**
+Replace `<BINARY>` below with the name from the table.
+
+**Quick run (macOS / Linux)**
 ```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-macos-aarch64 -o netscope && chmod +x netscope && ./netscope
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/<BINARY> -o netscope && chmod +x netscope && ./netscope
 ```
 
-**macOS — Intel**
+**Install to system (macOS / Linux)**
 ```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-macos-x86_64 -o netscope && chmod +x netscope && ./netscope
-```
-
-**Linux — x86_64**
-```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-x86_64 -o netscope && chmod +x netscope && ./netscope
-```
-
-**Linux — aarch64**
-```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-aarch64 -o netscope && chmod +x netscope && ./netscope
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/<BINARY> -o netscope && chmod +x netscope && sudo mv netscope /usr/local/bin/
 ```
 
 **Windows — PowerShell**
 ```powershell
+# Quick run
 irm https://github.com/xjoker/netscope/releases/latest/download/netscope-windows-x86_64.exe -OutFile netscope.exe; .\netscope.exe
-```
 
-### Install to system
-
-Install once and run `netscope` from anywhere.
-
-**macOS — Apple Silicon (M1/M2/M3)**
-```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-macos-aarch64 -o netscope && chmod +x netscope && sudo mv netscope /usr/local/bin/
-```
-
-**macOS — Intel**
-```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-macos-x86_64 -o netscope && chmod +x netscope && sudo mv netscope /usr/local/bin/
-```
-
-**Linux — x86_64**
-```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-x86_64 -o netscope && chmod +x netscope && sudo mv netscope /usr/local/bin/
-```
-
-**Linux — aarch64**
-```bash
-curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-aarch64 -o netscope && chmod +x netscope && sudo mv netscope /usr/local/bin/
-```
-
-**Windows — PowerShell (installs to `%ProgramFiles%\netscope`)**
-```powershell
-irm https://github.com/xjoker/netscope/releases/latest/download/netscope-windows-x86_64.exe -OutFile netscope.exe
+# Install to system
 New-Item -ItemType Directory -Force -Path "$env:ProgramFiles\netscope" | Out-Null
-Move-Item netscope.exe "$env:ProgramFiles\netscope\"
+Move-Item -Force netscope.exe "$env:ProgramFiles\netscope\"
 [Environment]::SetEnvironmentVariable("PATH", $env:PATH + ";$env:ProgramFiles\netscope", "User")
 ```
 
-### Download versioned release
+### Other options
 
-Browse all releases at [github.com/xjoker/netscope/releases](https://github.com/xjoker/netscope/releases).
-
-### Build from source
-
-```bash
-cargo build --release
-# binary at: target/release/netscope
-```
+- Browse all releases: [github.com/xjoker/netscope/releases](https://github.com/xjoker/netscope/releases)
+- Build from source: `cargo build --release` (binary at `target/release/netscope`)
 
 ---
 
