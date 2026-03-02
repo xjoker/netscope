@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            cross: false
+          - os: ubuntu-22.04
+            target: aarch64-unknown-linux-musl
+            cross: true
+          - os: macos-13
+            target: x86_64-apple-darwin
+            cross: false
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            cross: false
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl-tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get install -y musl-tools
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+        shell: bash
+
+      - name: Package
+        shell: bash
+        run: |
+          TAG=${GITHUB_REF_NAME}
+          BIN=netscope
+          TARGET=${{ matrix.target }}
+          DIR="dist/${BIN}-${TAG}-${TARGET}"
+          mkdir -p "$DIR"
+
+          if [[ "$TARGET" == *windows* ]]; then
+            cp "target/${TARGET}/release/${BIN}.exe" "$DIR/"
+            ARCHIVE="${DIR}.zip"
+            cd dist && zip -r "../${ARCHIVE}" "${BIN}-${TAG}-${TARGET}" && cd ..
+          else
+            cp "target/${TARGET}/release/${BIN}" "$DIR/"
+            ARCHIVE="${DIR}.tar.gz"
+            tar -czf "${ARCHIVE}" -C dist "${BIN}-${TAG}-${TARGET}"
+          fi
+
+          echo "ARCHIVE=${ARCHIVE}" >> $GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+          retention-days: 1
+
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
