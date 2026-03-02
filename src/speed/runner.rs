@@ -122,15 +122,17 @@ fn build_cloudflare_client(timeout: u64, proxy: Option<&str>) -> Result<Client> 
     builder.build().context("build cloudflare client failed")
 }
 
-/// Fetch https://speed.cloudflare.com/cdn-cgi/trace and extract node IP, colo, country.
-/// Returns (node_ip, location_string, ip_family, country_code).
-/// e.g. location_string = "SIN (SG)" where SIN is IATA colo code, SG is country.
+/// Fetch https://speed.cloudflare.com/cdn-cgi/trace and extract CDN edge info.
+/// Returns (location_string, country_code).
+/// `colo` is the IATA airport code of the edge PoP (e.g. "HKG", "SIN").
+/// `loc`  is the ISO country code of the client as seen by Cloudflare (e.g. "HK", "SG").
+/// Note: `ip=` in the trace is the *client* egress IP, NOT the CDN node IP — we ignore it.
 async fn fetch_cloudflare_trace(
     client: &Client,
     timeout: u64,
     proxy: Option<&str>,
-) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
-    // Use a short-timeout client for this probe — don't block test startup.
+) -> (Option<String>, Option<String>) {
+    // Short-timeout probe client — don't block test startup.
     let probe_client = {
         let t = timeout.min(6);
         let mut b = reqwest::Client::builder()
@@ -147,29 +149,22 @@ async fn fetch_cloudflare_trace(
         .await
     {
         Ok(r) => r,
-        Err(_) => return (None, None, None, None),
+        Err(_) => return (None, None),
     };
     let body = match resp.text().await {
         Ok(t) => t,
-        Err(_) => return (None, None, None, None),
+        Err(_) => return (None, None),
     };
 
-    // Parse key=value lines
-    let mut ip: Option<String>   = None;
     let mut colo: Option<String> = None;
     let mut loc: Option<String>  = None;
 
     for line in body.lines() {
-        if let Some(v) = line.strip_prefix("ip=")   { ip   = Some(v.trim().to_string()); }
         if let Some(v) = line.strip_prefix("colo=") { colo = Some(v.trim().to_string()); }
         if let Some(v) = line.strip_prefix("loc=")  { loc  = Some(v.trim().to_string()); }
     }
 
-    let family = ip.as_deref().and_then(|s| {
-        if s.contains(':') { Some("v6".to_string()) } else { Some("v4".to_string()) }
-    });
-
-    // Build a human-readable location string: "SIN (SG)"
+    // Location string: "HKG (HK)" — edge PoP code + client country
     let location = match (&colo, &loc) {
         (Some(c), Some(l)) => Some(format!("{c} ({l})")),
         (Some(c), None)    => Some(c.clone()),
@@ -177,7 +172,7 @@ async fn fetch_cloudflare_trace(
         _                  => None,
     };
 
-    (ip, location, family, loc)
+    (location, loc)
 }
 
 pub async fn run(cli: crate::cli::Cli) -> Result<(Report, u8)> {
@@ -486,19 +481,12 @@ pub async fn run(cli: crate::cli::Cli) -> Result<(Report, u8)> {
     // Cloudflare path: build report and run tests without DNS/preflight.
     let cf_base = Url::parse("https://speed.cloudflare.com").unwrap();
 
-    // Fetch cdn-cgi/trace to extract the CDN node IP, colo code, and country.
-    // This mirrors what Apple backend does via DNS + GeoIP, giving equivalent info.
-    let (cf_node_ip, cf_node_location, cf_family, cf_resolver_country) =
+    // Fetch cdn-cgi/trace: extract edge PoP location and client country code.
+    // Note: ip= in trace is the client egress IP, not the CDN node — we don't use it.
+    let (cf_node_location, cf_resolver_country) =
         fetch_cloudflare_trace(&client, cli_timeout, proxy).await;
 
-    // Send TUI events so Node Info and result page fill in like Apple backend.
-    if let Some(ref ip) = cf_node_ip {
-        crate::tui::send(TuiEvent::ResolveDone {
-            ip: ip.clone(),
-            family: cf_family.clone().unwrap_or_else(|| "v4".to_string()),
-            source: "cdn-cgi/trace".to_string(),
-        });
-    }
+    // Send GeoDone so TUI Node Info shows the edge PoP (e.g. "HKG (HK)")
     if let Some(ref loc) = cf_node_location {
         crate::tui::send(TuiEvent::GeoDone { location: loc.clone() });
     }
@@ -512,8 +500,8 @@ pub async fn run(cli: crate::cli::Cli) -> Result<(Report, u8)> {
         proxy: proxy.map(sanitize_proxy_display),
         resolver_country: effective_resolver_country,
         resolver_source: Some(selected_source),
-        selected_family: cf_family,
-        selected_ip: cf_node_ip,
+        selected_family: None,
+        selected_ip: None,
         selected_location: cf_node_location,
         egress_ipv4: egress.ipv4.map(|v| v.to_string()),
         egress_ipv4_cn: egress.ipv4_cn.map(|v| v.to_string()),
