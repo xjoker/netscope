@@ -100,7 +100,7 @@ pub fn emit_start_banner(is_json: bool, mode: &str, base_url: &Url, timeout: u64
     }
 
     let c = Colors::new();
-    let ver = env!("CARGO_PKG_VERSION");
+    let ver = env!("APP_VERSION");
     let target = base_url.host_str().unwrap_or("-");
 
     box_top(&c);

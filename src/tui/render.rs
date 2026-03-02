@@ -98,7 +98,7 @@ fn speed_bar(mbps: f64, max: f64, width: usize) -> String {
 // ═══════════════════════════════════════════════════════════════
 
 fn draw_header(f: &mut Frame, area: Rect, state: &AppState) {
-    let ver = env!("CARGO_PKG_VERSION");
+    let ver = env!("APP_VERSION");
 
     let backend_upper = state.backend.to_uppercase();
     let (badge_text, badge_col) = if state.backend == "cloudflare" {

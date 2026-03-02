@@ -122,6 +122,64 @@ fn build_cloudflare_client(timeout: u64, proxy: Option<&str>) -> Result<Client> 
     builder.build().context("build cloudflare client failed")
 }
 
+/// Fetch https://speed.cloudflare.com/cdn-cgi/trace and extract node IP, colo, country.
+/// Returns (node_ip, location_string, ip_family, country_code).
+/// e.g. location_string = "SIN (SG)" where SIN is IATA colo code, SG is country.
+async fn fetch_cloudflare_trace(
+    client: &Client,
+    timeout: u64,
+    proxy: Option<&str>,
+) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+    // Use a short-timeout client for this probe — don't block test startup.
+    let probe_client = {
+        let t = timeout.min(6);
+        let mut b = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(t));
+        if let Some(p) = proxy {
+            if let Ok(px) = reqwest::Proxy::all(p) { b = b.proxy(px); }
+        }
+        match b.build() { Ok(c) => c, Err(_) => client.clone() }
+    };
+
+    let resp = match probe_client
+        .get("https://speed.cloudflare.com/cdn-cgi/trace")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return (None, None, None, None),
+    };
+    let body = match resp.text().await {
+        Ok(t) => t,
+        Err(_) => return (None, None, None, None),
+    };
+
+    // Parse key=value lines
+    let mut ip: Option<String>   = None;
+    let mut colo: Option<String> = None;
+    let mut loc: Option<String>  = None;
+
+    for line in body.lines() {
+        if let Some(v) = line.strip_prefix("ip=")   { ip   = Some(v.trim().to_string()); }
+        if let Some(v) = line.strip_prefix("colo=") { colo = Some(v.trim().to_string()); }
+        if let Some(v) = line.strip_prefix("loc=")  { loc  = Some(v.trim().to_string()); }
+    }
+
+    let family = ip.as_deref().and_then(|s| {
+        if s.contains(':') { Some("v6".to_string()) } else { Some("v4".to_string()) }
+    });
+
+    // Build a human-readable location string: "SIN (SG)"
+    let location = match (&colo, &loc) {
+        (Some(c), Some(l)) => Some(format!("{c} ({l})")),
+        (Some(c), None)    => Some(c.clone()),
+        (None, Some(l))    => Some(l.clone()),
+        _                  => None,
+    };
+
+    (ip, location, family, loc)
+}
+
 pub async fn run(cli: crate::cli::Cli) -> Result<(Report, u8)> {
     let is_json = cli.json;
 
@@ -427,16 +485,36 @@ pub async fn run(cli: crate::cli::Cli) -> Result<(Report, u8)> {
 
     // Cloudflare path: build report and run tests without DNS/preflight.
     let cf_base = Url::parse("https://speed.cloudflare.com").unwrap();
+
+    // Fetch cdn-cgi/trace to extract the CDN node IP, colo code, and country.
+    // This mirrors what Apple backend does via DNS + GeoIP, giving equivalent info.
+    let (cf_node_ip, cf_node_location, cf_family, cf_resolver_country) =
+        fetch_cloudflare_trace(&client, cli_timeout, proxy).await;
+
+    // Send TUI events so Node Info and result page fill in like Apple backend.
+    if let Some(ref ip) = cf_node_ip {
+        crate::tui::send(TuiEvent::ResolveDone {
+            ip: ip.clone(),
+            family: cf_family.clone().unwrap_or_else(|| "v4".to_string()),
+            source: "cdn-cgi/trace".to_string(),
+        });
+    }
+    if let Some(ref loc) = cf_node_location {
+        crate::tui::send(TuiEvent::GeoDone { location: loc.clone() });
+    }
+
+    let effective_resolver_country = resolver_country.or(cf_resolver_country);
+
     let mut report = Report {
         schema_version: 1,
         mode: mode.clone(),
         target_host: target_host.clone(),
         proxy: proxy.map(sanitize_proxy_display),
-        resolver_country,
+        resolver_country: effective_resolver_country,
         resolver_source: Some(selected_source),
-        selected_family: selected_family_str,
-        selected_ip: selected_ip_str,
-        selected_location: None,
+        selected_family: cf_family,
+        selected_ip: cf_node_ip,
+        selected_location: cf_node_location,
         egress_ipv4: egress.ipv4.map(|v| v.to_string()),
         egress_ipv4_cn: egress.ipv4_cn.map(|v| v.to_string()),
         egress_ipv4_cn_geo: geo_v4_cn.clone(),

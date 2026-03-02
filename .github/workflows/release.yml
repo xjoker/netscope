@@ -57,6 +57,8 @@ jobs:
 
       - name: Build
         shell: bash
+        env:
+          APP_VERSION: ${{ github.ref_name }}
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }}
