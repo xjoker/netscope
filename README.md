@@ -24,7 +24,38 @@
 
 ## Installation
 
-### One-line install (latest release)
+### Quick run (no install)
+
+Try it once without installing — binary runs in the current directory and is discarded after.
+
+**macOS — Apple Silicon (M1/M2/M3)**
+```bash
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-macos-aarch64.tar.gz | tar -xz && ./netscope
+```
+
+**macOS — Intel**
+```bash
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-macos-x86_64.tar.gz | tar -xz && ./netscope
+```
+
+**Linux — x86_64**
+```bash
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-x86_64.tar.gz | tar -xz && ./netscope
+```
+
+**Linux — aarch64**
+```bash
+curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-aarch64.tar.gz | tar -xz && ./netscope
+```
+
+**Windows — PowerShell**
+```powershell
+irm https://github.com/xjoker/netscope/releases/latest/download/netscope-windows-x86_64.zip -OutFile netscope.zip; Expand-Archive netscope.zip .; .\netscope.exe
+```
+
+### Install to system
+
+Install once and run `netscope` from anywhere.
 
 **macOS — Apple Silicon (M1/M2/M3)**
 ```bash
@@ -46,12 +77,12 @@ curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-
 curl -fsSL https://github.com/xjoker/netscope/releases/latest/download/netscope-linux-aarch64.tar.gz | tar -xz && sudo mv netscope /usr/local/bin/
 ```
 
-**Windows — PowerShell**
+**Windows — PowerShell (installs to `%ProgramFiles%\netscope`)**
 ```powershell
-irm https://github.com/xjoker/netscope/releases/latest/download/netscope-windows-x86_64.zip -OutFile netscope.zip; Expand-Archive netscope.zip .; .\netscope.exe
+irm https://github.com/xjoker/netscope/releases/latest/download/netscope-windows-x86_64.zip -OutFile netscope.zip
+Expand-Archive netscope.zip -DestinationPath "$env:ProgramFiles\netscope"
+[Environment]::SetEnvironmentVariable("PATH", $env:PATH + ";$env:ProgramFiles\netscope", "User")
 ```
-
-After install, run `netscope` directly from any terminal.
 
 ### Download versioned release
 
