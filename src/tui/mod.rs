@@ -1,0 +1,211 @@
+pub mod render;
+pub mod state;
+
+use std::io;
+use std::sync::OnceLock;
+use std::time::Duration;
+
+use crossterm::event::{self, Event as CEvent, KeyCode};
+use crossterm::execute;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode,
+};
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+use tokio::sync::mpsc;
+
+use crate::tui::render::{draw, draw_result_table};
+use crate::tui::state::{AppState, Event, ResultFocus, StageStatus};
+
+/// Global sender — output.rs uses this to send events without passing it as a parameter
+static TX: OnceLock<mpsc::UnboundedSender<Event>> = OnceLock::new();
+
+pub fn global_tx() -> Option<&'static mpsc::UnboundedSender<Event>> {
+    TX.get()
+}
+
+pub fn send(ev: Event) {
+    if let Some(tx) = TX.get() {
+        let _ = tx.send(ev);
+    }
+}
+
+/// Initialise the TUI and return a receiver for use by run_tui_loop.
+/// Must be called inside a tokio runtime, before the Terminal is initialised.
+pub fn init_channel() -> mpsc::UnboundedReceiver<Event> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    TX.set(tx).expect("TUI channel already initialized");
+    rx
+}
+
+/// Start the TUI rendering loop, blocking until the task finishes and the user confirms exit.
+/// Must be called on a dedicated OS thread (not a tokio thread) because crossterm event polling is synchronous.
+pub fn run_tui_loop(
+    mut rx: mpsc::UnboundedReceiver<Event>,
+    mode: String,
+    target: String,
+    timeout: u64,
+    proxy: Option<String>,
+    backend: String,
+    abort_handle: tokio::task::AbortHandle,
+) -> io::Result<()> {
+    let backend_name = backend;
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let cb      = CrosstermBackend::new(stdout);
+    let mut term = Terminal::new(cb)?;
+
+    let mut state = AppState::new(&mode, &target, timeout, proxy, backend_name);
+    let tick_ms   = Duration::from_millis(80);
+    // Result-page cooldown frames: after finished, at least this many frames must render
+    // before accepting an exit keypress, to avoid consuming a leftover Enter key from the CLI.
+    let mut result_cooldown: u32 = 0;
+
+    let result = 'outer: loop {
+        // Drain all pending events from the queue
+        loop {
+            match rx.try_recv() {
+                Ok(ev) => apply_event(&mut state, ev),
+                Err(_) => break,
+            }
+        }
+
+        state.tick = state.tick.wrapping_add(1);
+
+        // Render
+        if state.finished {
+            term.draw(|f| draw_result_table(f, &state))?;
+            result_cooldown = result_cooldown.saturating_add(1);
+        } else {
+            term.draw(|f| draw(f, &state))?;
+        }
+
+        // Wait for a keyboard event (with timeout)
+        if event::poll(tick_ms)? {
+            if let CEvent::Key(key) = event::read()? {
+                match key.code {
+                    // q/Q/Esc exit at any time; abort the task if speed test is still running
+                    KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                        abort_handle.abort();
+                        break 'outer Ok(());
+                    }
+                    // Tab: toggle focus between Speed Results and Connectivity (result page only)
+                    KeyCode::Tab if state.finished => {
+                        state.result_focus = match state.result_focus {
+                            ResultFocus::Speed        => ResultFocus::Connectivity,
+                            ResultFocus::Connectivity => ResultFocus::Speed,
+                        };
+                    }
+                    // Scroll down in focused panel
+                    KeyCode::Down | KeyCode::Char('j') if state.finished => {
+                        match state.result_focus {
+                            ResultFocus::Speed        => state.scroll_speed = state.scroll_speed.saturating_add(1),
+                            ResultFocus::Connectivity => state.scroll_conn  = state.scroll_conn.saturating_add(1),
+                        }
+                    }
+                    // Scroll up in focused panel
+                    KeyCode::Up | KeyCode::Char('k') if state.finished => {
+                        match state.result_focus {
+                            ResultFocus::Speed        => state.scroll_speed = state.scroll_speed.saturating_sub(1),
+                            ResultFocus::Connectivity => state.scroll_conn  = state.scroll_conn.saturating_sub(1),
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    };
+
+    disable_raw_mode()?;
+    execute!(term.backend_mut(), LeaveAlternateScreen)?;
+    term.show_cursor()?;
+    result
+}
+
+fn apply_event(state: &mut AppState, ev: Event) {
+    match ev {
+        Event::CnMode(is_cn) => {
+            state.cn_mode = Some(is_cn);
+        }
+        Event::EgressDone { v4_cn, v4_global, v6_cn, v6_global,
+                            v4_cn_geo, v4_global_geo, v6_cn_geo, v6_global_geo } => {
+            state.egress_v4_cn         = v4_cn;
+            state.egress_v4_global     = v4_global;
+            state.egress_v6_cn         = v6_cn;
+            state.egress_v6_global     = v6_global;
+            state.egress_done          = true;
+            state.egress_v4_cn_geo     = v4_cn_geo;
+            state.egress_v4_global_geo = v4_global_geo;
+            state.egress_v6_cn_geo     = v6_cn_geo;
+            state.egress_v6_global_geo = v6_global_geo;
+        }
+        Event::ResolveDone { ip, family, source } => {
+            state.resolved_ip     = Some(ip);
+            state.resolved_family = Some(family);
+            state.resolved_source = Some(source);
+        }
+        Event::GeoDone { location } => {
+            state.location = Some(location);
+        }
+        Event::StageUpdate { stage, status } => {
+            match stage {
+                "ping"     => state.ping_status     = status,
+                "download" => state.download_status = status,
+                "upload"   => state.upload_status   = status,
+                _ => {}
+            }
+        }
+        Event::DownloadStage { name, concurrency, chunk_mib, secs, mbps } => {
+            state.download_stages.push(crate::tui::state::DownloadStageRow {
+                name, concurrency, chunk_mib, secs, mbps,
+            });
+        }
+        Event::PathsInit { paths } => {
+            state.paths = paths;
+        }
+        Event::PathUpdate { path_id, current_stage, cdn_ip, cdn_location, rtt_ms, tcp_rtt_ms, dl_mbps, ul_mbps, error, done } => {
+            if let Some(row) = state.paths.iter_mut().find(|r| r.path_id == path_id) {
+                // Paths already marked done do not accept state rollbacks
+                if row.done { return; }
+                row.current_stage = current_stage;
+                if cdn_ip.is_some() { row.cdn_ip = cdn_ip; }
+                if cdn_location.is_some() { row.cdn_location = cdn_location; }
+                if rtt_ms.is_some() { row.rtt_ms = rtt_ms; }
+                if tcp_rtt_ms.is_some() { row.tcp_rtt_ms = tcp_rtt_ms; }
+                if dl_mbps.is_some() { row.dl_mbps = dl_mbps; }
+                if ul_mbps.is_some() { row.ul_mbps = ul_mbps; }
+                if error.is_some() { row.error = error; }
+                row.done = done;
+            }
+        }
+        Event::Done { report, code } => {
+            state.exit_code    = code;
+            state.final_report = Some(report);
+            state.finished     = true;
+            // Sync stage statuses to their final values (in case runner never sent StageUpdate Done)
+            if !state.ping_status.is_done() {
+                state.ping_status = StageStatus::Waiting;
+            }
+            if !state.download_status.is_done() {
+                state.download_status = StageStatus::Waiting;
+            }
+            if !state.upload_status.is_done() {
+                state.upload_status = StageStatus::Waiting;
+            }
+        }
+        Event::ProbeDone { results } => {
+            state.probe_results = results;
+            state.probe_progress = None;
+        }
+        Event::ProbeProgress { done, total } => {
+            state.probe_progress = Some((done, total));
+        }
+        Event::Fatal(msg) => {
+            state.finished     = true;
+            state.exit_code    = 2;
+            state.ping_status  = StageStatus::Fail(msg.clone());
+        }
+    }
+}
