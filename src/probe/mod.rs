@@ -155,7 +155,10 @@ pub async fn run_probe(
     let total = targets.len();
     let done_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    // Send initial progress (0/N)
+    // Send target list first so TUI knows the full list, then initial progress (0/N)
+    crate::tui::send(crate::tui::state::Event::ProbeInit {
+        targets: targets.iter().map(|t| (t.name.to_string(), t.category.to_string())).collect(),
+    });
     crate::tui::send(crate::tui::state::Event::ProbeProgress { done: 0, total });
 
     let mut handles = Vec::with_capacity(total);
@@ -168,17 +171,18 @@ pub async fn run_probe(
         let done_counter = Arc::clone(&done_counter);
 
         let handle = tokio::spawn(async move {
-            let _permit = sem.acquire().await.ok();
+            let _permit = sem.acquire().await.expect("probe semaphore closed unexpectedly");
             let mut result = execute_probe(&client, &target, timeout_secs).await;
 
             if !skip_geo {
-                if let Some(ref ip_str) = result.exit_ip.clone() {
+                if let Some(ref ip_str) = result.exit_ip {
                     result.geo = geo_cache.lookup(ip_str).await;
                 }
             }
 
             // Report progress after each probe completes
             let done = done_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            crate::tui::send(crate::tui::state::Event::ProbePartial { result: result.clone() });
             crate::tui::send(crate::tui::state::Event::ProbeProgress { done, total });
 
             (idx, result)
@@ -188,8 +192,11 @@ pub async fn run_probe(
 
     let mut indexed: Vec<(usize, ProbeResult)> = Vec::with_capacity(handles.len());
     for handle in handles {
-        if let Ok(pair) = handle.await {
-            indexed.push(pair);
+        match handle.await {
+            Ok(pair) => indexed.push(pair),
+            Err(e) => {
+                eprintln!("probe task panicked: {e}");
+            }
         }
     }
     // Sort in original order

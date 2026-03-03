@@ -42,7 +42,7 @@ pub fn all_targets() -> Vec<ProbeTarget> {
         ProbeTarget { name: "Brave",      category: "search", method: ProbeMethod::Trace, url: "https://search.brave.com/cdn-cgi/trace",     header_key: None },
 
         // ── News ─────────────────────────────────────────────────────────────
-        ProbeTarget { name: "Wikipedia",  category: "news", method: ProbeMethod::Header, url: "https://www.wikipedia.org/robots.txt",        header_key: Some("x-client-ip") },
+        ProbeTarget { name: "Wikipedia",  category: "news", method: ProbeMethod::Http,   url: "https://en.wikipedia.org/robots.txt",         header_key: None },
         ProbeTarget { name: "BBC",        category: "news", method: ProbeMethod::Http,  url: "https://www.bbc.com/robots.txt",              header_key: None },
         ProbeTarget { name: "Reuters",    category: "news", method: ProbeMethod::Trace, url: "https://www.reuters.com/cdn-cgi/trace",       header_key: None },
         ProbeTarget { name: "NYT",        category: "news", method: ProbeMethod::Http,  url: "https://www.nytimes.com/robots.txt",          header_key: None },

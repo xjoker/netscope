@@ -88,6 +88,10 @@ pub enum Event {
     Done { report: Box<Report>, code: u8 },
     /// Routing probe: real-time progress (done / total)
     ProbeProgress { done: usize, total: usize },
+    /// Routing probe: target list initialised (for live rendering)
+    ProbeInit { targets: Vec<(String, String)> },
+    /// Routing probe: single target completed (live result)
+    ProbePartial { result: crate::probe::types::ProbeResult },
     /// Routing probe completed
     ProbeDone { results: Vec<crate::probe::types::ProbeResult> },
     /// Unrecoverable error
@@ -139,12 +143,20 @@ pub struct AppState {
 
     // Completion state
     pub finished: bool,
+    /// Whether speed test specifically has completed (stays true during probe-only retests)
+    pub speed_done: bool,
     pub exit_code: u8,
     pub final_report: Option<Box<Report>>,
     /// Routing probe results (Full mode)
     pub probe_results: Vec<crate::probe::types::ProbeResult>,
     /// Routing probe real-time progress: (done, total), None = not started
     pub probe_progress: Option<(usize, usize)>,
+    /// Probe target list for live rendering: (name, category)
+    pub probe_targets: Vec<(String, String)>,
+    /// Partial probe results accumulated during probing (live, per-site)
+    pub partial_probe_results: Vec<crate::probe::types::ProbeResult>,
+    /// Whether connectivity probe has completed
+    pub probe_done: bool,
 
     // Animation frame counter
     pub tick: u64,
@@ -152,11 +164,23 @@ pub struct AppState {
     pub result_focus: ResultFocus,
     pub scroll_speed: u16,
     pub scroll_conn: u16,
-    /// Whether a retest is currently in progress
-    pub retesting: bool,
+    /// Whether a speed retest is currently in progress
+    pub retesting_speed: bool,
+    /// Whether a connectivity retest is currently in progress
+    pub retesting_probe: bool,
 }
 
 impl AppState {
+    /// Recompute `finished` from `speed_done` and `probe_done`.
+    /// Must be called in every event handler that mutates either flag.
+    pub fn recompute_finished(&mut self) {
+        self.finished = self.speed_done && (self.probe_done || self.mode != "full");
+        if self.finished {
+            self.retesting_speed = false;
+            self.retesting_probe = false;
+        }
+    }
+
     pub fn new(mode: &str, proxy: Option<String>, backend: String) -> Self {
         let (ping_status, download_status, upload_status) = match mode {
             "ping"     => (StageStatus::Running, StageStatus::Waiting, StageStatus::Waiting),
@@ -187,15 +211,20 @@ impl AppState {
             upload_status,
             paths: vec![],
             finished: false,
+            speed_done: false,
             exit_code: 0,
             final_report: None,
             probe_results: vec![],
             probe_progress: None,
+            probe_targets: vec![],
+            partial_probe_results: vec![],
+            probe_done: false,
             tick: 0,
             result_focus: ResultFocus::Speed,
             scroll_speed: 0,
             scroll_conn: 0,
-            retesting: false,
+            retesting_speed: false,
+            retesting_probe: false,
         }
     }
 }

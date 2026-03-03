@@ -269,8 +269,14 @@ pub async fn run(cli: crate::cli::Cli) -> Result<(Report, u8)> {
         }
         let mut egress_geo: std::collections::HashMap<std::net::IpAddr, Option<String>> =
             std::collections::HashMap::new();
-        while let Some(Ok((ip, loc))) = geo_tasks.join_next().await {
-            egress_geo.insert(ip, loc);
+        while let Some(result) = geo_tasks.join_next().await {
+            match result {
+                Ok((ip, loc)) => { egress_geo.insert(ip, loc); }
+                Err(e) => {
+                    emit_status(is_json, StatusKind::Error, "geo",
+                        &format!("geo lookup task panicked: {e}"));
+                }
+            }
         }
         let gv4cn  = egress.ipv4_cn.and_then(|ip| egress_geo.get(&ip).cloned().flatten());
         let gv4gl  = egress.ipv4_global.and_then(|ip| egress_geo.get(&ip).cloned().flatten());
@@ -307,7 +313,7 @@ pub async fn run(cli: crate::cli::Cli) -> Result<(Report, u8)> {
     // The backend enum only affects which URLs are used for ping/download/upload.
     // For Apple: DoH resolution + IP pinning happens inside run_with_apple().
     // For Cloudflare: direct connection, no DoH; handled via direct=true path specs.
-    return run_with_apple(
+    return run_with_apple(SpeedContext {
         cli_timeout,
         is_json,
         parsed,
@@ -316,13 +322,13 @@ pub async fn run(cli: crate::cli::Cli) -> Result<(Report, u8)> {
         proxy,
         egress,
         resolver_country,
-        geo_v4_cn,
-        geo_v4_global,
-        geo_v6_cn,
-        geo_v6_global,
+        egress_ipv4_cn_geo: geo_v4_cn,
+        egress_ipv4_global_geo: geo_v4_global,
+        egress_ipv6_cn_geo: geo_v6_cn,
+        egress_ipv6_global_geo: geo_v6_global,
         command,
         mode,
-    )
+    })
     .await;
 }
 
@@ -508,15 +514,114 @@ async fn execute_command(
     }
 }
 
-/// Unified backend run: handles both Apple (DoH + IP pinning) and Cloudflare (direct connection).
-#[allow(clippy::too_many_arguments)]
-async fn run_with_apple(
+struct PathSpec {
+    path_id: String,
+    family: IpFamily,
+    side: String,
+    egress_ip: Option<std::net::IpAddr>,
+    /// true = Cloudflare direct path (no DoH)
+    direct: bool,
+}
+
+/// Build (v4,v6) × (cn,global) path descriptors, deduplicated.
+/// Only mainland China (CN) gets separate cn/global paths; other regions get only global.
+fn build_path_specs(
+    egress: &crate::network::egress::EgressProfile,
+    is_cn_mode: bool,
+    direct: bool,
+) -> Vec<PathSpec> {
+    let mut specs = Vec::new();
+
+    // v4 paths
+    if let Some(v4_cn) = egress.ipv4_cn {
+        if is_cn_mode {
+            let v4_gl = egress.ipv4_global;
+            specs.push(PathSpec {
+                path_id: "v4-cn".to_string(),
+                family: IpFamily::V4,
+                side: "cn".to_string(),
+                egress_ip: Some(v4_cn),
+                direct,
+            });
+            let add_global_v4 = v4_gl.map(|ip| ip != v4_cn).unwrap_or(true);
+            if add_global_v4 {
+                specs.push(PathSpec {
+                    path_id: "v4-global".to_string(),
+                    family: IpFamily::V4,
+                    side: "global".to_string(),
+                    egress_ip: v4_gl,
+                    direct,
+                });
+            }
+        } else {
+            specs.push(PathSpec {
+                path_id: "v4-global".to_string(),
+                family: IpFamily::V4,
+                side: "global".to_string(),
+                egress_ip: egress.ipv4_global.or(Some(v4_cn)),
+                direct,
+            });
+        }
+    } else if egress.ipv4_global.is_some() {
+        specs.push(PathSpec {
+            path_id: "v4-global".to_string(),
+            family: IpFamily::V4,
+            side: "global".to_string(),
+            egress_ip: egress.ipv4_global,
+            direct,
+        });
+    }
+
+    // v6 paths
+    if let Some(v6_cn) = egress.ipv6_cn {
+        if is_cn_mode {
+            let v6_gl = egress.ipv6_global;
+            specs.push(PathSpec {
+                path_id: "v6-cn".to_string(),
+                family: IpFamily::V6,
+                side: "cn".to_string(),
+                egress_ip: Some(v6_cn),
+                direct,
+            });
+            let add_global_v6 = v6_gl.map(|ip| ip != v6_cn).unwrap_or(true);
+            if add_global_v6 {
+                specs.push(PathSpec {
+                    path_id: "v6-global".to_string(),
+                    family: IpFamily::V6,
+                    side: "global".to_string(),
+                    egress_ip: v6_gl,
+                    direct,
+                });
+            }
+        } else {
+            specs.push(PathSpec {
+                path_id: "v6-global".to_string(),
+                family: IpFamily::V6,
+                side: "global".to_string(),
+                egress_ip: egress.ipv6_global.or(Some(v6_cn)),
+                direct,
+            });
+        }
+    } else if egress.ipv6_global.is_some() {
+        specs.push(PathSpec {
+            path_id: "v6-global".to_string(),
+            family: IpFamily::V6,
+            side: "global".to_string(),
+            egress_ip: egress.ipv6_global,
+            direct,
+        });
+    }
+
+    specs
+}
+
+struct SpeedContext<'a> {
     cli_timeout: u64,
     is_json: bool,
     parsed: Url,
     host: String,
     backend: SpeedBackend,
-    proxy: Option<&str>,
+    proxy: Option<&'a str>,
     egress: crate::network::egress::EgressProfile,
     resolver_country: Option<String>,
     egress_ipv4_cn_geo: Option<String>,
@@ -525,7 +630,26 @@ async fn run_with_apple(
     egress_ipv6_global_geo: Option<String>,
     command: Command,
     mode: String,
-) -> Result<(Report, u8)> {
+}
+
+/// Unified backend run: handles both Apple (DoH + IP pinning) and Cloudflare (direct connection).
+async fn run_with_apple(ctx: SpeedContext<'_>) -> Result<(Report, u8)> {
+    let SpeedContext {
+        cli_timeout,
+        is_json,
+        parsed,
+        host,
+        backend,
+        proxy,
+        egress,
+        resolver_country,
+        egress_ipv4_cn_geo,
+        egress_ipv4_global_geo,
+        egress_ipv6_cn_geo,
+        egress_ipv6_global_geo,
+        command,
+        mode,
+    } = ctx;
     // ── Per-backend: resolve the primary target and populate initial Report fields ──
 
     let is_cloudflare = backend == SpeedBackend::Cloudflare;
@@ -548,7 +672,7 @@ async fn run_with_apple(
         egress_ipv6_global: egress.ipv6_global.map(|v| v.to_string()),
         egress_ipv6_global_geo,
         egress_consistent: Some(egress.consistent),
-        egress_note: Some(egress.note),
+        egress_note: Some(egress.note.clone()),
         timestamp_unix: now_unix(),
         ..Default::default()
     };
@@ -597,8 +721,14 @@ async fn run_with_apple(
                     preflight_stack(&pu, &t, px.as_deref(), b).await
                 });
             }
-            while let Some(Ok(m)) = pf_set.join_next().await {
-                preflight_metrics.push(m);
+            while let Some(result) = pf_set.join_next().await {
+                match result {
+                    Ok(m) => preflight_metrics.push(m),
+                    Err(e) => {
+                        emit_status(is_json, StatusKind::Error, "preflight",
+                            &format!("preflight task panicked: {e}"));
+                    }
+                }
             }
         }
 
@@ -640,186 +770,10 @@ async fn run_with_apple(
     }
 
     // ── Multi-path speed test: (v4,v6) × (cn,global), deduplicated ──────────
-    // Build path descriptor list.
-    // Only mainland China (CN) gets separate cn/global path testing; other regions test only the global path.
     let is_cn_mode = resolver_country.as_deref() == Some("CN");
     crate::tui::send(TuiEvent::CnMode(is_cn_mode));
 
-    struct PathSpec {
-        path_id: String,
-        family: IpFamily,
-        side: String,
-        egress_ip: Option<std::net::IpAddr>,
-        /// true = Cloudflare direct path (no DoH)
-        direct: bool,
-    }
-
-    let mut path_specs: Vec<PathSpec> = Vec::new();
-
-    if is_cloudflare {
-        // Cloudflare: mirror the Apple path logic — CN mode gets cn+global paths, others get single path.
-        // The difference: all Cloudflare paths are "direct" (no DoH, no IP pinning).
-        // v4 paths
-        if let Some(v4_cn) = egress.ipv4_cn {
-            if is_cn_mode {
-                let v4_gl = egress.ipv4_global;
-                path_specs.push(PathSpec {
-                    path_id: "v4-cn".to_string(),
-                    family: IpFamily::V4,
-                    side: "cn".to_string(),
-                    egress_ip: Some(v4_cn),
-                    direct: true,
-                });
-                let add_global_v4 = v4_gl.map(|ip| ip != v4_cn).unwrap_or(true);
-                if add_global_v4 {
-                    path_specs.push(PathSpec {
-                        path_id: "v4-global".to_string(),
-                        family: IpFamily::V4,
-                        side: "global".to_string(),
-                        egress_ip: v4_gl,
-                        direct: true,
-                    });
-                }
-            } else {
-                path_specs.push(PathSpec {
-                    path_id: "v4-global".to_string(),
-                    family: IpFamily::V4,
-                    side: "global".to_string(),
-                    egress_ip: egress.ipv4_global.or(Some(v4_cn)),
-                    direct: true,
-                });
-            }
-        } else if egress.ipv4_global.is_some() {
-            path_specs.push(PathSpec {
-                path_id: "v4-global".to_string(),
-                family: IpFamily::V4,
-                side: "global".to_string(),
-                egress_ip: egress.ipv4_global,
-                direct: true,
-            });
-        }
-
-        // v6 paths
-        if let Some(v6_cn) = egress.ipv6_cn {
-            if is_cn_mode {
-                let v6_gl = egress.ipv6_global;
-                path_specs.push(PathSpec {
-                    path_id: "v6-cn".to_string(),
-                    family: IpFamily::V6,
-                    side: "cn".to_string(),
-                    egress_ip: Some(v6_cn),
-                    direct: true,
-                });
-                let add_global_v6 = v6_gl.map(|ip| ip != v6_cn).unwrap_or(true);
-                if add_global_v6 {
-                    path_specs.push(PathSpec {
-                        path_id: "v6-global".to_string(),
-                        family: IpFamily::V6,
-                        side: "global".to_string(),
-                        egress_ip: v6_gl,
-                        direct: true,
-                    });
-                }
-            } else {
-                path_specs.push(PathSpec {
-                    path_id: "v6-global".to_string(),
-                    family: IpFamily::V6,
-                    side: "global".to_string(),
-                    egress_ip: egress.ipv6_global.or(Some(v6_cn)),
-                    direct: true,
-                });
-            }
-        } else if egress.ipv6_global.is_some() {
-            path_specs.push(PathSpec {
-                path_id: "v6-global".to_string(),
-                family: IpFamily::V6,
-                side: "global".to_string(),
-                egress_ip: egress.ipv6_global,
-                direct: true,
-            });
-        }
-    } else {
-        // Apple: DoH-based paths, (v4,v6) × (cn,global)
-        // v4 paths
-        if let Some(v4_cn) = egress.ipv4_cn {
-            if is_cn_mode {
-                let v4_gl = egress.ipv4_global;
-                path_specs.push(PathSpec {
-                    path_id: "v4-cn".to_string(),
-                    family: IpFamily::V4,
-                    side: "cn".to_string(),
-                    egress_ip: Some(v4_cn),
-                    direct: false,
-                });
-                let add_global_v4 = v4_gl.map(|ip| ip != v4_cn).unwrap_or(true);
-                if add_global_v4 {
-                    path_specs.push(PathSpec {
-                        path_id: "v4-global".to_string(),
-                        family: IpFamily::V4,
-                        side: "global".to_string(),
-                        egress_ip: v4_gl,
-                        direct: false,
-                    });
-                }
-            } else {
-                path_specs.push(PathSpec {
-                    path_id: "v4-global".to_string(),
-                    family: IpFamily::V4,
-                    side: "global".to_string(),
-                    egress_ip: egress.ipv4_global.or(Some(v4_cn)),
-                    direct: false,
-                });
-            }
-        } else if egress.ipv4_global.is_some() {
-            path_specs.push(PathSpec {
-                path_id: "v4-global".to_string(),
-                family: IpFamily::V4,
-                side: "global".to_string(),
-                egress_ip: egress.ipv4_global,
-                direct: false,
-            });
-        }
-
-        // v6 paths
-        if let Some(v6_cn) = egress.ipv6_cn {
-            if is_cn_mode {
-                let v6_gl = egress.ipv6_global;
-                path_specs.push(PathSpec {
-                    path_id: "v6-cn".to_string(),
-                    family: IpFamily::V6,
-                    side: "cn".to_string(),
-                    egress_ip: Some(v6_cn),
-                    direct: false,
-                });
-                let add_global_v6 = v6_gl.map(|ip| ip != v6_cn).unwrap_or(true);
-                if add_global_v6 {
-                    path_specs.push(PathSpec {
-                        path_id: "v6-global".to_string(),
-                        family: IpFamily::V6,
-                        side: "global".to_string(),
-                        egress_ip: v6_gl,
-                        direct: false,
-                    });
-                }
-            } else {
-                path_specs.push(PathSpec {
-                    path_id: "v6-global".to_string(),
-                    family: IpFamily::V6,
-                    side: "global".to_string(),
-                    egress_ip: egress.ipv6_global.or(Some(v6_cn)),
-                    direct: false,
-                });
-            }
-        } else if egress.ipv6_global.is_some() {
-            path_specs.push(PathSpec {
-                path_id: "v6-global".to_string(),
-                family: IpFamily::V6,
-                side: "global".to_string(),
-                egress_ip: egress.ipv6_global,
-                direct: false,
-            });
-        }
-    }
+    let path_specs = build_path_specs(&egress, is_cn_mode, is_cloudflare);
 
     if path_specs.is_empty() {
         // Apple fallback: build a simple client for the selected IP if available, else fail
@@ -831,6 +785,12 @@ async fn run_with_apple(
                 return Ok((report, code));
             }
         }
+        // No usable paths — notify TUI so it doesn't stay in "loading" state
+        emit_status(is_json, StatusKind::Error, "speed", "no usable network paths found");
+        crate::tui::send(TuiEvent::StageUpdate {
+            stage: "ping",
+            status: TuiStageStatus::Fail("no usable paths".to_string()),
+        });
         return Ok((report, 2));
     }
 
@@ -1034,8 +994,14 @@ async fn run_with_apple(
 
     // Collect results in path order (JoinSet completes out of order; sort afterwards)
     let mut resolved_paths: Vec<ResolvedPath> = Vec::new();
-    while let Some(Ok(rp)) = resolve_set.join_next().await {
-        resolved_paths.push(rp);
+    while let Some(result) = resolve_set.join_next().await {
+        match result {
+            Ok(rp) => resolved_paths.push(rp),
+            Err(e) => {
+                emit_status(is_json, StatusKind::Error, "resolve",
+                    &format!("path resolve task panicked: {e}"));
+            }
+        }
     }
     // Maintain v4-cn / v4-global / v6-cn / v6-global order
     let order = ["v4-cn", "v4-global", "v6-cn", "v6-global"];
@@ -1156,7 +1122,7 @@ async fn run_with_apple(
         // Paths that failed resolution
         let cdn_target = match rp.cdn_target {
             None => {
-                let fail_msg = rp.error.clone().as_deref().unwrap_or("DoH failed").to_string();
+                let fail_msg = rp.error.as_deref().unwrap_or("DoH failed").to_string();
                 path_results.push(PathResult {
                     path_id: path_id.clone(),
                     family: rp.family.as_str().to_string(),
@@ -1324,11 +1290,12 @@ async fn run_with_apple(
                 let cdn_ip2 = cdn_ip_str.clone();
                 let cdn_loc2 = path_cdn_location.clone();
                 let rtt = path_rtt;
+                let tcp_rtt = path_tcp_rtt;
                 move |v| {
                     crate::tui::send(TuiEvent::PathUpdate {
                         path_id: path_id2.clone(), current_stage: "download".to_string(),
                         cdn_ip: Some(cdn_ip2.clone()), cdn_location: cdn_loc2.clone(),
-                        rtt_ms: rtt, tcp_rtt_ms: None, dl_mbps: Some(v), ul_mbps: None, error: None, done: false,
+                        rtt_ms: rtt, tcp_rtt_ms: tcp_rtt, dl_mbps: Some(v), ul_mbps: None, error: None, done: false,
                     });
                 }
             }))).await {
@@ -1416,11 +1383,21 @@ async fn run_with_apple(
 
     // Extract the best values from multi-path results and fill top-level fields (for backward compatibility)
     let best_path = report.paths.iter()
-        .filter(|p| p.error.is_none())
+        .filter(|p| p.download_mbps.is_some() || p.upload_mbps.is_some() || p.rtt_ms.is_some())
         .max_by(|a, b| {
-            let da = a.download_mbps.unwrap_or(0.0);
-            let db = b.download_mbps.unwrap_or(0.0);
-            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            // Multi-level sort: download (higher=better) → upload (higher=better) → RTT (lower=better)
+            let cmp = a.download_mbps.unwrap_or(0.0)
+                .partial_cmp(&b.download_mbps.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal);
+            if cmp != std::cmp::Ordering::Equal { return cmp; }
+            let cmp = a.upload_mbps.unwrap_or(0.0)
+                .partial_cmp(&b.upload_mbps.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal);
+            if cmp != std::cmp::Ordering::Equal { return cmp; }
+            // RTT: lower is better, so reverse comparison
+            b.rtt_ms.unwrap_or(f64::MAX)
+                .partial_cmp(&a.rtt_ms.unwrap_or(f64::MAX))
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
     if let Some(bp) = best_path {
         if report.rtt_ms.is_none() { report.rtt_ms = bp.rtt_ms; }
@@ -1430,8 +1407,8 @@ async fn run_with_apple(
 
     let code = if any_success { 0 } else { 2 };
 
-    // Full mode: automatically run routing probe after speed test completes
-    if matches!(command, Command::Full { .. }) {
+    // Full mode + JSON: run probe inline (TUI mode runs probe in parallel externally)
+    if matches!(command, Command::Full { .. }) && is_json {
         emit_status(is_json, StatusKind::Info, "probe", "running connectivity probe...");
         let probe_targets = crate::probe::target::all_targets();
         let probe_results = crate::probe::run_probe(probe_targets, 8, 10, proxy, false).await;

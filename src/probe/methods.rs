@@ -44,15 +44,14 @@ fn make_error_result(target: &ProbeTarget, error: String) -> ProbeResult {
 
 /// Send a single timed GET and return elapsed ms (to first byte).
 /// Returns None on timeout or connection error.
-async fn sample_ttfb(client: &Client, url: &str, timeout_secs: u64) -> Option<f64> {
+/// Note: the reqwest client already has a global timeout configured via `build_aux_client`;
+/// we do NOT wrap with an additional `tokio::time::timeout` to avoid double-timeout confusion.
+/// Any status code that indicates the server responded (even 4xx) counts as a valid latency
+/// sample, since we are measuring network round-trip, not application correctness.
+async fn sample_ttfb(client: &Client, url: &str) -> Option<f64> {
     let t = Instant::now();
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        client.get(url).send(),
-    )
-    .await;
-    match result {
-        Ok(Ok(resp)) if resp.status().as_u16() < 600 => {
+    match client.get(url).send().await {
+        Ok(resp) if resp.status().as_u16() < 500 => {
             Some(t.elapsed().as_secs_f64() * 1000.0)
         }
         _ => None,
@@ -63,18 +62,18 @@ async fn sample_ttfb(client: &Client, url: &str, timeout_secs: u64) -> Option<f6
 /// trimmed mean (drop highest and lowest, average the rest).
 /// The first request (warmup) has already been done by the caller; we sleep
 /// briefly, then take PROBE_SAMPLES fresh measurements.
-async fn avg_ttfb(client: &Client, url: &str, timeout_secs: u64, _first_ms: f64) -> f64 {
+async fn avg_ttfb(client: &Client, url: &str, first_ms: f64) -> f64 {
     // Cooldown after warmup request
     tokio::time::sleep(std::time::Duration::from_millis(WARMUP_COOLDOWN_MS)).await;
 
     let mut samples = Vec::with_capacity(PROBE_SAMPLES);
     for _ in 0..PROBE_SAMPLES {
-        if let Some(ms) = sample_ttfb(client, url, timeout_secs).await {
+        if let Some(ms) = sample_ttfb(client, url).await {
             samples.push(ms);
         }
     }
     if samples.is_empty() {
-        return _first_ms; // fallback: no successful sample, use warmup value
+        return first_ms; // fallback: no successful sample, use warmup value
     }
     if samples.len() <= 2 {
         // Not enough to trim; plain average
@@ -96,19 +95,31 @@ async fn probe_trace(client: &Client, target: &ProbeTarget, timeout_secs: u64) -
 
     match result {
         Err(_) => {
-            // timeout → fallback to http
-            return probe_http(client, target, timeout_secs).await;
+            // timeout → report as unreachable (don't fallback to probe_http with the same /cdn-cgi/trace URL)
+            make_error_result(target, "timeout".to_string())
         }
-        Ok(Err(_e)) => {
-            // request error → fallback to http
-            return probe_http(client, target, timeout_secs).await;
+        Ok(Err(e)) => {
+            // request error → report as unreachable
+            make_error_result(target, format!("request failed: {e}"))
         }
         Ok(Ok(resp)) => {
             let first_ms = start.elapsed().as_secs_f64() * 1000.0;
             let status_code = resp.status().as_u16();
             if !resp.status().is_success() {
-                // non-2xx → fallback
-                return probe_http(client, target, timeout_secs).await;
+                // non-2xx → report with the first-request latency (don't fallback to same URL)
+                return ProbeResult {
+                    name: target.name.to_string(),
+                    category: target.category.to_string(),
+                    url: target.url.to_string(),
+                    reachable: false,
+                    status_code: Some(status_code),
+                    ttfb_ms: Some(first_ms),
+                    exit_ip: None,
+                    colo: None,
+                    loc: None,
+                    geo: None,
+                    error: Some(format!("HTTP {status_code}")),
+                };
             }
             let body = match resp.text().await {
                 Ok(b) => b,
@@ -137,14 +148,27 @@ async fn probe_trace(client: &Client, target: &ProbeTarget, timeout_secs: u64) -
                 }
             }
 
-            // No ip field → fallback to http probe
+            // No ip field → not a valid trace response; return error with the first-request latency
+            // instead of falling back to probe_http (which would re-request the same /cdn-cgi/trace URL)
             if exit_ip.is_none() {
                 let _ = fl;
-                return probe_http(client, target, timeout_secs).await;
+                return ProbeResult {
+                    name: target.name.to_string(),
+                    category: target.category.to_string(),
+                    url: target.url.to_string(),
+                    reachable: true,
+                    status_code: Some(status_code),
+                    ttfb_ms: Some(first_ms),
+                    exit_ip: None,
+                    colo,
+                    loc,
+                    geo: None,
+                    error: Some("trace: no ip field".to_string()),
+                };
             }
 
             // Warm averaged latency from additional samples
-            let ttfb_ms = avg_ttfb(client, target.url, timeout_secs, first_ms).await;
+            let ttfb_ms = avg_ttfb(client, target.url, first_ms).await;
 
             ProbeResult {
                 name: target.name.to_string(),
@@ -181,7 +205,7 @@ async fn probe_http(client: &Client, target: &ProbeTarget, timeout_secs: u64) ->
             let reachable   = status.is_success() || status_code < 500;
 
             let ttfb_ms = if reachable {
-                avg_ttfb(client, target.url, timeout_secs, first_ms).await
+                avg_ttfb(client, target.url, first_ms).await
             } else {
                 first_ms
             };
@@ -251,7 +275,7 @@ async fn probe_api_direct(client: &Client, target: &ProbeTarget, timeout_secs: u
             });
 
             // Additional timing samples for averaged latency
-            let ttfb_ms = avg_ttfb(client, target.url, timeout_secs, first_ms).await;
+            let ttfb_ms = avg_ttfb(client, target.url, first_ms).await;
 
             ProbeResult {
                 name: target.name.to_string(),
@@ -285,6 +309,7 @@ async fn probe_header(client: &Client, target: &ProbeTarget, timeout_secs: u64) 
             let first_ms   = start.elapsed().as_secs_f64() * 1000.0;
             let status      = resp.status();
             let status_code = status.as_u16();
+            // Header method: reachable only on 2xx (server must actually respond with content)
             let reachable   = status.is_success();
 
             let exit_ip = target.header_key.and_then(|key| {
@@ -295,7 +320,7 @@ async fn probe_header(client: &Client, target: &ProbeTarget, timeout_secs: u64) 
             });
 
             let ttfb_ms = if reachable {
-                avg_ttfb(client, target.url, timeout_secs, first_ms).await
+                avg_ttfb(client, target.url, first_ms).await
             } else {
                 first_ms
             };
