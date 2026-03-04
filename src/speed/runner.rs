@@ -8,7 +8,7 @@ use crate::cli::{Command, command_name, sanitize_proxy_display, validate_proxy_u
 use crate::network::IpFamily;
 use crate::network::client::build_client;
 use crate::network::dns::{
-    SelectedTarget, normalize_country_code, resolve_host_ip, select_best_ip,
+    SelectedTarget, normalize_country_code, select_best_ip,
 };
 use crate::network::egress::detect_egress_profile;
 use crate::network::geo::{detect_country_by_ip, lookup_ip_location};
@@ -122,15 +122,17 @@ fn build_cloudflare_client(timeout: u64, proxy: Option<&str>) -> Result<Client> 
     builder.build().context("build cloudflare client failed")
 }
 
-/// Fetch https://speed.cloudflare.com/cdn-cgi/trace and extract node IP, colo, country.
-/// Returns (node_ip, location_string, ip_family, country_code).
-/// e.g. location_string = "SIN (SG)" where SIN is IATA colo code, SG is country.
+/// Fetch https://speed.cloudflare.com/cdn-cgi/trace and extract CDN edge info.
+/// Returns (location_string, country_code).
+/// `colo` is the IATA airport code of the edge PoP (e.g. "HKG", "SIN").
+/// `loc`  is the ISO country code of the client as seen by Cloudflare (e.g. "HK", "SG").
+/// Note: `ip=` in the trace is the *client* egress IP, NOT the CDN node IP — we ignore it.
 async fn fetch_cloudflare_trace(
     client: &Client,
     timeout: u64,
     proxy: Option<&str>,
-) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
-    // Use a short-timeout client for this probe — don't block test startup.
+) -> (Option<String>, Option<String>) {
+    // Short-timeout probe client — don't block test startup.
     let probe_client = {
         let t = timeout.min(6);
         let mut b = reqwest::Client::builder()
@@ -147,29 +149,22 @@ async fn fetch_cloudflare_trace(
         .await
     {
         Ok(r) => r,
-        Err(_) => return (None, None, None, None),
+        Err(_) => return (None, None),
     };
     let body = match resp.text().await {
         Ok(t) => t,
-        Err(_) => return (None, None, None, None),
+        Err(_) => return (None, None),
     };
 
-    // Parse key=value lines
-    let mut ip: Option<String>   = None;
     let mut colo: Option<String> = None;
     let mut loc: Option<String>  = None;
 
     for line in body.lines() {
-        if let Some(v) = line.strip_prefix("ip=")   { ip   = Some(v.trim().to_string()); }
         if let Some(v) = line.strip_prefix("colo=") { colo = Some(v.trim().to_string()); }
         if let Some(v) = line.strip_prefix("loc=")  { loc  = Some(v.trim().to_string()); }
     }
 
-    let family = ip.as_deref().and_then(|s| {
-        if s.contains(':') { Some("v6".to_string()) } else { Some("v4".to_string()) }
-    });
-
-    // Build a human-readable location string: "SIN (SG)"
+    // Location string: "HKG (HK)" — edge PoP code + client country
     let location = match (&colo, &loc) {
         (Some(c), Some(l)) => Some(format!("{c} ({l})")),
         (Some(c), None)    => Some(c.clone()),
@@ -177,7 +172,7 @@ async fn fetch_cloudflare_trace(
         _                  => None,
     };
 
-    (ip, location, family, loc)
+    (location, loc)
 }
 
 pub async fn run(cli: crate::cli::Cli) -> Result<(Report, u8)> {
@@ -198,7 +193,7 @@ pub async fn run(cli: crate::cli::Cli) -> Result<(Report, u8)> {
     // Destructure CLI fields to avoid borrow/move conflicts.
     let cli_timeout = cli.timeout;
     let cli_country = cli.country;
-    let cli_verbose = cli.verbose;
+    let _cli_verbose = cli.verbose;
     let proxy_owned = cli.proxy.clone();
     let proxy = proxy_owned.as_deref();
 
@@ -274,8 +269,14 @@ pub async fn run(cli: crate::cli::Cli) -> Result<(Report, u8)> {
         }
         let mut egress_geo: std::collections::HashMap<std::net::IpAddr, Option<String>> =
             std::collections::HashMap::new();
-        while let Some(Ok((ip, loc))) = geo_tasks.join_next().await {
-            egress_geo.insert(ip, loc);
+        while let Some(result) = geo_tasks.join_next().await {
+            match result {
+                Ok((ip, loc)) => { egress_geo.insert(ip, loc); }
+                Err(e) => {
+                    emit_status(is_json, StatusKind::Error, "geo",
+                        &format!("geo lookup task panicked: {e}"));
+                }
+            }
         }
         let gv4cn  = egress.ipv4_cn.and_then(|ip| egress_geo.get(&ip).cloned().flatten());
         let gv4gl  = egress.ipv4_global.and_then(|ip| egress_geo.get(&ip).cloned().flatten());
@@ -308,231 +309,27 @@ pub async fn run(cli: crate::cli::Cli) -> Result<(Report, u8)> {
         }
     };
 
-    // For Cloudflare backend, skip DoH DNS resolution and IP selection.
-    // Build a plain client and set target_host to speed.cloudflare.com.
-    let (client, selected_ip_str, selected_family_str, selected_source, target_host) =
-        if backend == SpeedBackend::Cloudflare {
-            let cf_client = build_cloudflare_client(cli_timeout, proxy)?;
-            (
-                cf_client,
-                None::<String>,
-                None::<String>,
-                "cloudflare-direct".to_string(),
-                "speed.cloudflare.com".to_string(),
-            )
-        } else {
-            // Apple backend: DoH resolution + IP selection.
-            emit_status(
-                is_json,
-                StatusKind::Info,
-                "resolve",
-                &format!(
-                    "DoH resolving {} (country={})",
-                    host,
-                    resolver_country
-                        .clone()
-                        .unwrap_or_else(|| "auto".to_string())
-                ),
-            );
-
-            let mut targets = Vec::new();
-            let mut resolve_errors = Vec::new();
-            let egress_ip_v4 = egress.ipv4_cn.or(egress.ipv4_global);
-            let egress_ip_v6 = egress.ipv6_cn.or(egress.ipv6_global);
-            let has_v6 = egress.ipv6.is_some();
-
-            // Resolve v4 and v6 concurrently to save DoH + candidate probe time
-            let parsed_v4 = parsed.clone();
-            let parsed_v6 = parsed.clone();
-            let host_v4 = host.clone();
-            let host_v6 = host.clone();
-            let proxy_v4 = proxy.map(str::to_string);
-            let proxy_v6 = proxy.map(str::to_string);
-            let country_v4 = resolver_country.clone();
-            let country_v6 = resolver_country.clone();
-            let (res_v4, res_v6) = tokio::join!(
-                async move {
-                    select_best_ip(
-                        &parsed_v4, &host_v4, cli_timeout,
-                        country_v4.as_deref(), IpFamily::V4,
-                        proxy_v4.as_deref(), egress_ip_v4, cli_verbose,
-                    ).await
-                },
-                async move {
-                    if !has_v6 {
-                        return Err(anyhow!("no v6 egress"));
-                    }
-                    select_best_ip(
-                        &parsed_v6, &host_v6, cli_timeout,
-                        country_v6.as_deref(), IpFamily::V6,
-                        proxy_v6.as_deref(), egress_ip_v6, cli_verbose,
-                    ).await
-                },
-            );
-            match res_v4 {
-                Ok((t, _)) => targets.push(t),
-                Err(err) => resolve_errors.push(format!("v4 {}", short_error(&err))),
-            }
-            match res_v6 {
-                Ok((t, _)) => targets.push(t),
-                Err(err) if has_v6 => resolve_errors.push(format!("v6 {}", short_error(&err))),
-                Err(_) => {}
-            }
-            if targets.is_empty() {
-                emit_status(
-                    is_json,
-                    StatusKind::Error,
-                    "resolve",
-                    &format!("DoH failed, fallback to system DNS: {}", resolve_errors.join(" | ")),
-                );
-                if let Some(ip) = resolve_host_ip(&host).await {
-                    targets.push(SelectedTarget {
-                        family: if ip.is_ipv4() {
-                            IpFamily::V4
-                        } else {
-                            IpFamily::V6
-                        },
-                        ip,
-                        source: "system-dns".to_string(),
-                    });
-                }
-            }
-
-            // Dual-stack preflight (only for Apple backend).
-            let mut dual_stack_preflight_inner = Vec::new();
-            if targets.len() > 1 {
-                emit_status(
-                    is_json,
-                    StatusKind::Info,
-                    "dual",
-                    "detected IPv6, running dual-stack preflight",
-                );
-                let mut joinset = tokio::task::JoinSet::new();
-                for target in targets.clone() {
-                    let base = parsed.clone();
-                    let proxy_owned = proxy.map(str::to_string);
-                    joinset.spawn(async move {
-                        preflight_stack(&base, &target, proxy_owned.as_deref(), backend).await
-                    });
-                }
-                while let Some(joined) = joinset.join_next().await {
-                    dual_stack_preflight_inner.push(joined.context("dual preflight task failed")?);
-                }
-                emit_status(is_json, StatusKind::Ok, "dual", "dual-stack preflight done");
-            }
-
-            let selected = choose_primary_target(&targets, &dual_stack_preflight_inner)
-                .ok_or_else(|| anyhow!("no resolved target ip"))?;
-            emit_status(
-                is_json,
-                StatusKind::Ok,
-                "resolve",
-                &format!(
-                    "{} {} -> {}",
-                    selected.family.as_str(),
-                    selected.source,
-                    selected.ip
-                ),
-            );
-            crate::tui::send(TuiEvent::ResolveDone {
-                ip: selected.ip.to_string(),
-                family: selected.family.as_str().to_string(),
-                source: selected.source.clone(),
-            });
-            if cli_verbose {
-                eprintln!(
-                    "using host={}, family={}, ip={}, resolver={}, country={}",
-                    host,
-                    selected.family.as_str(),
-                    selected.ip,
-                    selected.source,
-                    resolver_country.clone().unwrap_or_else(|| "-".to_string())
-                );
-            }
-
-            let apple_client = build_client(&parsed, selected.ip, cli_timeout, proxy)?;
-            let ip_str = selected.ip.to_string();
-            let fam_str = selected.family.as_str().to_string();
-            let src_str = selected.source.clone();
-
-            // We store preflight in a temporary variable and return it alongside.
-            // To keep the tuple uniform, we store it in the report later.
-            // Return a sentinel tuple; dual_stack_preflight is handled below.
-            return run_with_apple(
-                cli_timeout,
-                is_json,
-                parsed,
-                host,
-                backend,
-                proxy,
-                egress,
-                resolver_country,
-                selected,
-                apple_client,
-                ip_str,
-                fam_str,
-                src_str,
-                dual_stack_preflight_inner,
-                command,
-                mode,
-                geo_v4_cn,
-                geo_v4_global,
-                geo_v6_cn,
-                geo_v6_global,
-            )
-            .await;
-        };
-
-    // Cloudflare path: build report and run tests without DNS/preflight.
-    let cf_base = Url::parse("https://speed.cloudflare.com").unwrap();
-
-    // Fetch cdn-cgi/trace to extract the CDN node IP, colo code, and country.
-    // This mirrors what Apple backend does via DNS + GeoIP, giving equivalent info.
-    let (cf_node_ip, cf_node_location, cf_family, cf_resolver_country) =
-        fetch_cloudflare_trace(&client, cli_timeout, proxy).await;
-
-    // Send TUI events so Node Info and result page fill in like Apple backend.
-    if let Some(ref ip) = cf_node_ip {
-        crate::tui::send(TuiEvent::ResolveDone {
-            ip: ip.clone(),
-            family: cf_family.clone().unwrap_or_else(|| "v4".to_string()),
-            source: "cdn-cgi/trace".to_string(),
-        });
-    }
-    if let Some(ref loc) = cf_node_location {
-        crate::tui::send(TuiEvent::GeoDone { location: loc.clone() });
-    }
-
-    let effective_resolver_country = resolver_country.or(cf_resolver_country);
-
-    let mut report = Report {
-        schema_version: 1,
-        mode: mode.clone(),
-        target_host: target_host.clone(),
-        proxy: proxy.map(sanitize_proxy_display),
-        resolver_country: effective_resolver_country,
-        resolver_source: Some(selected_source),
-        selected_family: cf_family,
-        selected_ip: cf_node_ip,
-        selected_location: cf_node_location,
-        egress_ipv4: egress.ipv4.map(|v| v.to_string()),
-        egress_ipv4_cn: egress.ipv4_cn.map(|v| v.to_string()),
-        egress_ipv4_cn_geo: geo_v4_cn.clone(),
-        egress_ipv4_global: egress.ipv4_global.map(|v| v.to_string()),
-        egress_ipv4_global_geo: geo_v4_global.clone(),
-        egress_ipv6: egress.ipv6.map(|v| v.to_string()),
-        egress_ipv6_cn: egress.ipv6_cn.map(|v| v.to_string()),
-        egress_ipv6_cn_geo: geo_v6_cn.clone(),
-        egress_ipv6_global: egress.ipv6_global.map(|v| v.to_string()),
-        egress_ipv6_global_geo: geo_v6_global.clone(),
-        egress_consistent: Some(egress.consistent),
-        egress_note: Some(egress.note),
-        ..Default::default()
-    };
-
-    let code = execute_command(command, &client, &cf_base, backend, is_json, &mut report).await;
-
-    Ok((report, code))
+    // Both Apple and Cloudflare backends share the same execution path from here.
+    // The backend enum only affects which URLs are used for ping/download/upload.
+    // For Apple: DoH resolution + IP pinning happens inside run_with_apple().
+    // For Cloudflare: direct connection, no DoH; handled via direct=true path specs.
+    return run_with_apple(SpeedContext {
+        cli_timeout,
+        is_json,
+        parsed,
+        host,
+        backend,
+        proxy,
+        egress,
+        resolver_country,
+        egress_ipv4_cn_geo: geo_v4_cn,
+        egress_ipv4_global_geo: geo_v4_global,
+        egress_ipv6_cn_geo: geo_v6_cn,
+        egress_ipv6_global_geo: geo_v6_global,
+        command,
+        mode,
+    })
+    .await;
 }
 
 /// Execute the speed command stages, mutating the report.
@@ -576,17 +373,6 @@ async fn execute_command(
             emit_status(is_json, StatusKind::Info, "download", "starting download");
             match run_download_tests(client, base_url, duration, backend, None).await {
                 Ok(dl_run) => {
-                    for s in &dl_run.stages {
-                        if let Some(mbps) = s.mbps {
-                            crate::tui::send(TuiEvent::DownloadStage {
-                                name: s.name.clone(),
-                                concurrency: s.concurrency,
-                                chunk_mib: s.chunk_mib,
-                                secs: s.duration_secs,
-                                mbps,
-                            });
-                        }
-                    }
                     report.cdn_meta = dl_run.cdn_meta;
                     report.download_stages = dl_run.stages;
                     report.download_stats = dl_run.download_stats;
@@ -668,17 +454,6 @@ async fn execute_command(
             match run_download_tests(client, base_url, duration, backend, None).await {
                 Ok(dl_run) if dl_run.best_mbps.is_some() => {
                     let v = dl_run.best_mbps.unwrap_or(0.0);
-                    for s in &dl_run.stages {
-                        if let Some(mbps) = s.mbps {
-                            crate::tui::send(TuiEvent::DownloadStage {
-                                name: s.name.clone(),
-                                concurrency: s.concurrency,
-                                chunk_mib: s.chunk_mib,
-                                secs: s.duration_secs,
-                                mbps,
-                            });
-                        }
-                    }
                     report.cdn_meta = dl_run.cdn_meta;
                     report.download_stages = dl_run.stages;
                     report.download_stats = dl_run.download_stats;
@@ -739,40 +514,153 @@ async fn execute_command(
     }
 }
 
-/// Apple-backend full run (with DNS resolution, IP selection, preflight).
-#[allow(clippy::too_many_arguments)]
-async fn run_with_apple(
+struct PathSpec {
+    path_id: String,
+    family: IpFamily,
+    side: String,
+    egress_ip: Option<std::net::IpAddr>,
+    /// true = Cloudflare direct path (no DoH)
+    direct: bool,
+}
+
+/// Build (v4,v6) × (cn,global) path descriptors, deduplicated.
+/// Only mainland China (CN) gets separate cn/global paths; other regions get only global.
+fn build_path_specs(
+    egress: &crate::network::egress::EgressProfile,
+    is_cn_mode: bool,
+    direct: bool,
+) -> Vec<PathSpec> {
+    let mut specs = Vec::new();
+
+    // v4 paths
+    if let Some(v4_cn) = egress.ipv4_cn {
+        if is_cn_mode {
+            let v4_gl = egress.ipv4_global;
+            specs.push(PathSpec {
+                path_id: "v4-cn".to_string(),
+                family: IpFamily::V4,
+                side: "cn".to_string(),
+                egress_ip: Some(v4_cn),
+                direct,
+            });
+            let add_global_v4 = v4_gl.map(|ip| ip != v4_cn).unwrap_or(true);
+            if add_global_v4 {
+                specs.push(PathSpec {
+                    path_id: "v4-global".to_string(),
+                    family: IpFamily::V4,
+                    side: "global".to_string(),
+                    egress_ip: v4_gl,
+                    direct,
+                });
+            }
+        } else {
+            specs.push(PathSpec {
+                path_id: "v4-global".to_string(),
+                family: IpFamily::V4,
+                side: "global".to_string(),
+                egress_ip: egress.ipv4_global.or(Some(v4_cn)),
+                direct,
+            });
+        }
+    } else if egress.ipv4_global.is_some() {
+        specs.push(PathSpec {
+            path_id: "v4-global".to_string(),
+            family: IpFamily::V4,
+            side: "global".to_string(),
+            egress_ip: egress.ipv4_global,
+            direct,
+        });
+    }
+
+    // v6 paths
+    if let Some(v6_cn) = egress.ipv6_cn {
+        if is_cn_mode {
+            let v6_gl = egress.ipv6_global;
+            specs.push(PathSpec {
+                path_id: "v6-cn".to_string(),
+                family: IpFamily::V6,
+                side: "cn".to_string(),
+                egress_ip: Some(v6_cn),
+                direct,
+            });
+            let add_global_v6 = v6_gl.map(|ip| ip != v6_cn).unwrap_or(true);
+            if add_global_v6 {
+                specs.push(PathSpec {
+                    path_id: "v6-global".to_string(),
+                    family: IpFamily::V6,
+                    side: "global".to_string(),
+                    egress_ip: v6_gl,
+                    direct,
+                });
+            }
+        } else {
+            specs.push(PathSpec {
+                path_id: "v6-global".to_string(),
+                family: IpFamily::V6,
+                side: "global".to_string(),
+                egress_ip: egress.ipv6_global.or(Some(v6_cn)),
+                direct,
+            });
+        }
+    } else if egress.ipv6_global.is_some() {
+        specs.push(PathSpec {
+            path_id: "v6-global".to_string(),
+            family: IpFamily::V6,
+            side: "global".to_string(),
+            egress_ip: egress.ipv6_global,
+            direct,
+        });
+    }
+
+    specs
+}
+
+struct SpeedContext<'a> {
     cli_timeout: u64,
     is_json: bool,
     parsed: Url,
     host: String,
     backend: SpeedBackend,
-    proxy: Option<&str>,
+    proxy: Option<&'a str>,
     egress: crate::network::egress::EgressProfile,
     resolver_country: Option<String>,
-    selected: SelectedTarget,
-    client: Client,
-    ip_str: String,
-    fam_str: String,
-    src_str: String,
-    dual_stack_preflight: Vec<StackPreflightMetric>,
-    command: Command,
-    mode: String,
     egress_ipv4_cn_geo: Option<String>,
     egress_ipv4_global_geo: Option<String>,
     egress_ipv6_cn_geo: Option<String>,
     egress_ipv6_global_geo: Option<String>,
-) -> Result<(Report, u8)> {
+    command: Command,
+    mode: String,
+}
+
+/// Unified backend run: handles both Apple (DoH + IP pinning) and Cloudflare (direct connection).
+async fn run_with_apple(ctx: SpeedContext<'_>) -> Result<(Report, u8)> {
+    let SpeedContext {
+        cli_timeout,
+        is_json,
+        parsed,
+        host,
+        backend,
+        proxy,
+        egress,
+        resolver_country,
+        egress_ipv4_cn_geo,
+        egress_ipv4_global_geo,
+        egress_ipv6_cn_geo,
+        egress_ipv6_global_geo,
+        command,
+        mode,
+    } = ctx;
+    // ── Per-backend: resolve the primary target and populate initial Report fields ──
+
+    let is_cloudflare = backend == SpeedBackend::Cloudflare;
+
+    // Common egress fields for the report (same regardless of backend)
     let mut report = Report {
         schema_version: 1,
         mode: mode.clone(),
         target_host: host.clone(),
         proxy: proxy.map(sanitize_proxy_display),
         resolver_country: resolver_country.clone(),
-        resolver_source: Some(src_str),
-        selected_family: Some(fam_str),
-        selected_ip: Some(ip_str),
-        selected_location: None,
         egress_ipv4: egress.ipv4.map(|v| v.to_string()),
         egress_ipv4_cn: egress.ipv4_cn.map(|v| v.to_string()),
         egress_ipv4_cn_geo,
@@ -784,139 +672,131 @@ async fn run_with_apple(
         egress_ipv6_global: egress.ipv6_global.map(|v| v.to_string()),
         egress_ipv6_global_geo,
         egress_consistent: Some(egress.consistent),
-        egress_note: Some(egress.note),
+        egress_note: Some(egress.note.clone()),
         timestamp_unix: now_unix(),
-        dual_stack_preflight,
         ..Default::default()
     };
 
-    emit_status(
-        is_json,
-        StatusKind::Info,
-        "geo",
-        &format!("querying node location {}", selected.ip),
-    );
-    match lookup_ip_location(selected.ip, cli_timeout, proxy).await {
-        Ok(Some(loc)) => {
-            report.selected_location = Some(loc.clone());
-            emit_status(is_json, StatusKind::Ok, "geo", &loc);
-            crate::tui::send(TuiEvent::GeoDone { location: loc });
+    if is_cloudflare {
+        // Cloudflare: direct connection, no DoH. Fetch cdn-cgi/trace for location info.
+        let probe_client = build_cloudflare_client(cli_timeout, proxy)
+            .unwrap_or_else(|_| reqwest::Client::new());
+        let (cf_location, _cf_country) =
+            fetch_cloudflare_trace(&probe_client, cli_timeout, proxy).await;
+        report.resolver_source = Some("cloudflare-direct".to_string());
+        report.selected_location = cf_location.clone();
+        if let Some(ref loc) = cf_location {
+            crate::tui::send(TuiEvent::GeoDone { location: loc.clone() });
         }
-        Ok(None) => {
-            emit_status(is_json, StatusKind::Info, "geo", "no location data");
-            crate::tui::send(TuiEvent::GeoDone { location: "-".to_string() });
+    } else {
+        // Apple: perform DoH resolution to find the best IP, then geo-look it up.
+        emit_status(is_json, StatusKind::Info, "resolve",
+            &format!("resolving {} via DoH", host));
+
+        let country_for_doh = resolver_country.as_deref();
+        let (v4_result, v6_result) = tokio::join!(
+            select_best_ip(&parsed, &host, cli_timeout, country_for_doh,
+                IpFamily::V4, proxy, egress.ipv4_global.or(egress.ipv4_cn), false),
+            select_best_ip(&parsed, &host, cli_timeout, country_for_doh,
+                IpFamily::V6, proxy, egress.ipv6_global.or(egress.ipv6_cn), false),
+        );
+
+        let mut targets: Vec<SelectedTarget> = Vec::new();
+        let mut preflight_metrics: Vec<StackPreflightMetric> = Vec::new();
+
+        // Collect V4 result
+        if let Ok((t, _)) = v4_result { targets.push(t); }
+        // Collect V6 result
+        if let Ok((t, _)) = v6_result { targets.push(t); }
+
+        // Dual-stack preflight if we have more than one target
+        if targets.len() > 1 {
+            let mut pf_set: tokio::task::JoinSet<StackPreflightMetric> =
+                tokio::task::JoinSet::new();
+            for t in targets.clone() {
+                let pu = parsed.clone();
+                let b = backend;
+                let px = proxy.map(str::to_string);
+                pf_set.spawn(async move {
+                    preflight_stack(&pu, &t, px.as_deref(), b).await
+                });
+            }
+            while let Some(result) = pf_set.join_next().await {
+                match result {
+                    Ok(m) => preflight_metrics.push(m),
+                    Err(e) => {
+                        emit_status(is_json, StatusKind::Error, "preflight",
+                            &format!("preflight task panicked: {e}"));
+                    }
+                }
+            }
         }
-        Err(err) => {
-            emit_status(
-                is_json,
-                StatusKind::Error,
-                "geo",
-                &format!("geo lookup failed: {}", short_error(&err)),
-            );
+
+        report.dual_stack_preflight = preflight_metrics.clone();
+
+        let selected = choose_primary_target(&targets, &preflight_metrics);
+        if let Some(ref sel) = selected {
+            let ip_str  = sel.ip.to_string();
+            let fam_str = sel.family.as_str().to_string();
+            let src_str = sel.source.clone();
+            crate::tui::send(TuiEvent::ResolveDone {
+                ip: ip_str.clone(),
+                family: fam_str.clone(),
+                source: src_str.clone(),
+            });
+            report.selected_ip     = Some(ip_str.clone());
+            report.selected_family = Some(fam_str);
+            report.resolver_source = Some(src_str);
+
+            // GeoIP lookup for the selected IP
+            emit_status(is_json, StatusKind::Info, "geo",
+                &format!("querying node location {}", sel.ip));
+            match lookup_ip_location(sel.ip, cli_timeout, proxy).await {
+                Ok(Some(loc)) => {
+                    report.selected_location = Some(loc.clone());
+                    emit_status(is_json, StatusKind::Ok, "geo", &loc);
+                    crate::tui::send(TuiEvent::GeoDone { location: loc });
+                }
+                Ok(None) => {
+                    emit_status(is_json, StatusKind::Info, "geo", "no location data");
+                    crate::tui::send(TuiEvent::GeoDone { location: "-".to_string() });
+                }
+                Err(err) => {
+                    emit_status(is_json, StatusKind::Error, "geo",
+                        &format!("geo lookup failed: {}", short_error(&err)));
+                }
+            }
         }
     }
 
     // ── Multi-path speed test: (v4,v6) × (cn,global), deduplicated ──────────
-    // Build path descriptor list: (path_id, family, side, egress_ip)
-    // Only mainland China (CN) gets separate cn/global path testing; other regions test only the global path
     let is_cn_mode = resolver_country.as_deref() == Some("CN");
     crate::tui::send(TuiEvent::CnMode(is_cn_mode));
 
-    struct PathSpec {
-        path_id: String,
-        family: IpFamily,
-        side: String,
-        egress_ip: Option<std::net::IpAddr>,
-    }
-
-    let mut path_specs: Vec<PathSpec> = Vec::new();
-
-    // v4 paths
-    if let Some(v4_cn) = egress.ipv4_cn {
-        if is_cn_mode {
-            let v4_gl = egress.ipv4_global;
-            path_specs.push(PathSpec {
-                path_id: "v4-cn".to_string(),
-                family: IpFamily::V4,
-                side: "cn".to_string(),
-                egress_ip: Some(v4_cn),
-            });
-            // If the global IP differs from the CN IP, or if global is None (proxy present but no global egress detected),
-            // add a global path so that ECS=None on the proxy side lets the CDN return the globally nearest node
-            let add_global_v4 = v4_gl.map(|ip| ip != v4_cn).unwrap_or(true);
-            if add_global_v4 {
-                path_specs.push(PathSpec {
-                    path_id: "v4-global".to_string(),
-                    family: IpFamily::V4,
-                    side: "global".to_string(),
-                    egress_ip: v4_gl,
-                });
-            }
-        } else {
-            // Non-CN: test global path only
-            path_specs.push(PathSpec {
-                path_id: "v4-global".to_string(),
-                family: IpFamily::V4,
-                side: "global".to_string(),
-                egress_ip: egress.ipv4_global.or(Some(v4_cn)),
-            });
-        }
-    } else if egress.ipv4_global.is_some() {
-        path_specs.push(PathSpec {
-            path_id: "v4-global".to_string(),
-            family: IpFamily::V4,
-            side: "global".to_string(),
-            egress_ip: egress.ipv4_global,
-        });
-    }
-
-    // v6 paths
-    if let Some(v6_cn) = egress.ipv6_cn {
-        if is_cn_mode {
-            let v6_gl = egress.ipv6_global;
-            path_specs.push(PathSpec {
-                path_id: "v6-cn".to_string(),
-                family: IpFamily::V6,
-                side: "cn".to_string(),
-                egress_ip: Some(v6_cn),
-            });
-            let add_global_v6 = v6_gl.map(|ip| ip != v6_cn).unwrap_or(true);
-            if add_global_v6 {
-                path_specs.push(PathSpec {
-                    path_id: "v6-global".to_string(),
-                    family: IpFamily::V6,
-                    side: "global".to_string(),
-                    egress_ip: v6_gl,
-                });
-            }
-        } else {
-            path_specs.push(PathSpec {
-                path_id: "v6-global".to_string(),
-                family: IpFamily::V6,
-                side: "global".to_string(),
-                egress_ip: egress.ipv6_global.or(Some(v6_cn)),
-            });
-        }
-    } else if egress.ipv6_global.is_some() {
-        path_specs.push(PathSpec {
-            path_id: "v6-global".to_string(),
-            family: IpFamily::V6,
-            side: "global".to_string(),
-            egress_ip: egress.ipv6_global,
-        });
-    }
+    let path_specs = build_path_specs(&egress, is_cn_mode, is_cloudflare);
 
     if path_specs.is_empty() {
-        // Fallback: run a single test using the already-selected target
-        let code = execute_command(command, &client, &parsed, backend, is_json, &mut report).await;
-        return Ok((report, code));
+        // Apple fallback: build a simple client for the selected IP if available, else fail
+        if let (Some(ip_str), false) = (report.selected_ip.as_deref(), is_cloudflare) {
+            if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+                let fallback_client = build_client(&parsed, ip, cli_timeout, proxy)
+                    .context("build fallback client")?;
+                let code = execute_command(command, &fallback_client, &parsed, backend, is_json, &mut report).await;
+                return Ok((report, code));
+            }
+        }
+        // No usable paths — notify TUI so it doesn't stay in "loading" state
+        emit_status(is_json, StatusKind::Error, "speed", "no usable network paths found");
+        crate::tui::send(TuiEvent::StageUpdate {
+            stage: "ping",
+            status: TuiStageStatus::Fail("no usable paths".to_string()),
+        });
+        return Ok((report, 2));
     }
 
     // Initialise the TUI path list
     let init_rows: Vec<PathRow> = path_specs.iter().map(|p| PathRow {
         path_id: p.path_id.clone(),
-        family: p.family.as_str().to_string(),
-        side: p.side.clone(),
         current_stage: "waiting".to_string(),
         cdn_ip: None,
         cdn_location: None,
@@ -946,7 +826,7 @@ async fn run_with_apple(
         family: crate::network::IpFamily,
         side: String,
         egress_ip: Option<std::net::IpAddr>,
-        /// None means resolution failed
+        /// None means resolution failed (always Some for direct paths)
         cdn_target: Option<crate::network::dns::SelectedTarget>,
         cdn_location: Option<String>,
         candidates_report: Vec<crate::report::CandidateProbeResult>,
@@ -954,6 +834,8 @@ async fn run_with_apple(
         error: Option<String>,
         /// Whether the node is reachable (selected candidate download_ok)
         reachable: bool,
+        /// true = Cloudflare direct path
+        direct: bool,
     }
 
     // Send all path_specs to a JoinSet for parallel resolution
@@ -967,6 +849,7 @@ async fn run_with_apple(
         let family     = spec.family;
         let side       = spec.side.clone();
         let egress_ip  = spec.egress_ip;
+        let direct     = spec.direct;
 
         // Update TUI: resolution started
         crate::tui::send(TuiEvent::PathUpdate {
@@ -975,14 +858,86 @@ async fn run_with_apple(
             cdn_ip: None, cdn_location: None,
             rtt_ms: None, tcp_rtt_ms: None, dl_mbps: None, ul_mbps: None, error: None, done: false,
         });
-        emit_status(is_json, StatusKind::Info, &path_id,
-            &format!("[{path_id}] resolving via DoH (egress={egress_ip:?})"));
+
+        if direct {
+            emit_status(is_json, StatusKind::Info, &path_id,
+                &format!("[{path_id}] Cloudflare direct path"));
+        } else {
+            emit_status(is_json, StatusKind::Info, &path_id,
+                &format!("[{path_id}] resolving via DoH (egress={egress_ip:?})"));
+        }
 
         resolve_set.spawn(async move {
+            if direct {
+                // Cloudflare direct: use DoH to resolve the real edge IP, then IP-pin the trace request.
+                // CN side: use CN DoH providers (AliDNS/DNSPod/360DNS, no proxy) to get the mainland-served edge IP.
+                // Global side: use global DoH providers with the real egress IP for ECS.
+                let country_for_doh: Option<&str> = if side == "cn" { Some("CN") } else { None };
+                let doh_proxy: Option<&str> = if side == "cn" { None } else { proxy_str.as_deref() };
+
+                let cf_base_url = Url::parse("https://speed.cloudflare.com").unwrap();
+                let resolve_result = select_best_ip(
+                    &cf_base_url, "speed.cloudflare.com", cli_timeout,
+                    country_for_doh, family, doh_proxy, egress_ip, false,
+                ).await;
+
+                match resolve_result {
+                    Err(e) => {
+                        return ResolvedPath {
+                            path_id, family, side, egress_ip,
+                            cdn_target: None, cdn_location: None,
+                            candidates_report: vec![],
+                            error: Some(short_error(&e)),
+                            reachable: false,
+                            direct: true,
+                        };
+                    }
+                    Ok((cdn_target, candidate_results)) => {
+                        // Fetch cdn-cgi/trace via the pinned IP to confirm edge location
+                        let trace_proxy: Option<&str> = if side == "cn" { None } else { proxy_str.as_deref() };
+                        let cf_loc = if let Ok(pinned_client) = build_client(
+                            &cf_base_url, cdn_target.ip, cli_timeout.min(10), trace_proxy
+                        ) {
+                            fetch_cloudflare_trace(&pinned_client, cli_timeout, trace_proxy).await.0
+                        } else {
+                            None
+                        };
+
+                        // Direct (Cloudflare) paths: always treat as reachable.
+                        // The candidate probe uses Apple's /api/v1/gm/large URL which
+                        // Cloudflare does not serve, so download_ok is always false there.
+                        let reachable = true;
+
+                        let candidates_report = candidate_results.iter()
+                            .map(|c| crate::report::CandidateProbeResult {
+                                ip: c.ip.to_string(),
+                                sources: c.sources.clone(),
+                                rtt_ms: c.rtt_ms,
+                                download_ok: c.download_ok,
+                                selected: c.selected,
+                                location: c.location.clone(),
+                            })
+                            .collect();
+
+                        return ResolvedPath {
+                            path_id,
+                            family,
+                            side,
+                            egress_ip,
+                            cdn_target: Some(cdn_target),
+                            cdn_location: cf_loc,
+                            candidates_report,
+                            error: None,
+                            reachable,
+                            direct: true,
+                        };
+                    }
+                }
+            }
+
+            // Apple DoH resolution
             let country_for_doh: Option<&str> = if side == "cn" { Some("CN") } else { None };
-            // CN path: both the DoH query and candidate probing bypass the proxy.
-            // A detected CN egress IP means a direct mainland connection exists; the proxy only affects global paths.
-            // If CN DoH also went through the proxy, AliDNS/DNSPod would see the proxy IP and return HK nodes.
+            // CN path: DoH and candidate probing bypass the proxy so AliDNS/DNSPod sees the CN IP.
             let doh_proxy: Option<&str> = if side == "cn" { None } else { proxy_str.as_deref() };
             let resolve_result = select_best_ip(
                 &parsed2, &host2, cli_timeout,
@@ -996,6 +951,7 @@ async fn run_with_apple(
                     candidates_report: vec![],
                     error: Some(short_error(&e)),
                     reachable: false,
+                    direct: false,
                 },
                 Ok((cdn_target, candidate_results)) => {
                     let reachable = candidate_results.iter()
@@ -1003,7 +959,7 @@ async fn run_with_apple(
                         .map(|c| c.download_ok)
                         .unwrap_or(false);
 
-                    // Concurrent GeoIP lookup (reachable nodes only)
+                    // GeoIP lookup (reachable nodes only)
                     let cdn_location = if reachable {
                         lookup_ip_location(cdn_target.ip, cli_timeout, proxy_str.as_deref())
                             .await.ok().flatten()
@@ -1029,16 +985,23 @@ async fn run_with_apple(
                         candidates_report,
                         error: None,
                         reachable,
+                        direct: false,
                     }
                 }
             }
         });
     }
 
-    // Collect results in the original path order (JoinSet completes out of order; sort by path_id)
+    // Collect results in path order (JoinSet completes out of order; sort afterwards)
     let mut resolved_paths: Vec<ResolvedPath> = Vec::new();
-    while let Some(Ok(rp)) = resolve_set.join_next().await {
-        resolved_paths.push(rp);
+    while let Some(result) = resolve_set.join_next().await {
+        match result {
+            Ok(rp) => resolved_paths.push(rp),
+            Err(e) => {
+                emit_status(is_json, StatusKind::Error, "resolve",
+                    &format!("path resolve task panicked: {e}"));
+            }
+        }
     }
     // Maintain v4-cn / v4-global / v6-cn / v6-global order
     let order = ["v4-cn", "v4-global", "v6-cn", "v6-global"];
@@ -1049,10 +1012,11 @@ async fn run_with_apple(
     // Update TUI: all paths resolved; refresh node / error state
     let mut primary_node_updated = false;
     for rp in &resolved_paths {
+        // ── All paths (Apple DoH + Cloudflare DoH-resolved) ──
         if let Some(ref target) = rp.cdn_target {
             let cdn_ip_str = target.ip.to_string();
 
-            // Log: candidate IP details
+            // Log candidate IP details
             for c in &rp.candidates_report {
                 let sel = if c.selected { " ★" } else { "" };
                 emit_status(is_json, StatusKind::Info, &rp.path_id, &format!(
@@ -1117,7 +1081,34 @@ async fn run_with_apple(
         }
     }
 
-    // ── Phase 2: sequential speed testing (avoid saturating bandwidth simultaneously which would skew results) ──
+    // ── Phase 2: sequential speed testing ──
+    // Deduplicate paths: if multiple resolved paths share the same CDN IP, merge into
+    // one path (labeled "v4-cn+global" or similar) to avoid testing the same node twice.
+    let mut seen_ips: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let resolved_paths: Vec<ResolvedPath> = {
+        let mut deduped: Vec<ResolvedPath> = Vec::new();
+        for rp in resolved_paths {
+            let ip_key = rp.cdn_target.as_ref()
+                .map(|t| t.ip.to_string())
+                .unwrap_or_default();
+            if ip_key.is_empty() || seen_ips.insert(ip_key.clone()) {
+                deduped.push(rp);
+            } else {
+                // Duplicate CDN IP: mark the TUI row as merged/skipped
+                emit_status(is_json, StatusKind::Info, &rp.path_id,
+                    &format!("[{}] same CDN IP as previous path ({ip_key}), skipped", rp.path_id));
+                crate::tui::send(TuiEvent::PathUpdate {
+                    path_id: rp.path_id.clone(),
+                    current_stage: "merged".to_string(),
+                    cdn_ip: Some(ip_key),
+                    cdn_location: rp.cdn_location.clone(),
+                    rtt_ms: None, tcp_rtt_ms: None, dl_mbps: None, ul_mbps: None,
+                    error: None, done: true,
+                });
+            }
+        }
+        deduped
+    };
 
     let mut path_results: Vec<PathResult> = Vec::new();
     let mut any_success = false;
@@ -1125,9 +1116,13 @@ async fn run_with_apple(
     for rp in resolved_paths {
         let path_id = &rp.path_id;
 
-        // Paths that failed resolution are written to results directly
+        // CN paths bypass the proxy (both Apple and Cloudflare)
+        let path_proxy = if rp.side == "cn" { None } else { proxy };
+
+        // Paths that failed resolution
         let cdn_target = match rp.cdn_target {
             None => {
+                let fail_msg = rp.error.as_deref().unwrap_or("DoH failed").to_string();
                 path_results.push(PathResult {
                     path_id: path_id.clone(),
                     family: rp.family.as_str().to_string(),
@@ -1141,13 +1136,23 @@ async fn run_with_apple(
                     candidates: rp.candidates_report,
                     error: rp.error,
                 });
+                // Update TUI if not already marked failed
+                if rp.direct {
+                    crate::tui::send(TuiEvent::PathUpdate {
+                        path_id: path_id.clone(),
+                        current_stage: "failed".to_string(),
+                        cdn_ip: None, cdn_location: None,
+                        rtt_ms: None, tcp_rtt_ms: None, dl_mbps: None, ul_mbps: None,
+                        error: Some(fail_msg.to_string()), done: true,
+                    });
+                }
                 continue;
             }
             Some(t) => t,
         };
 
-        // Paths whose node is unreachable
-        if !rp.reachable {
+        // Paths whose node is unreachable (Apple DoH only; Cloudflare always treated as reachable)
+        if !rp.reachable && !rp.direct {
             path_results.push(PathResult {
                 path_id: path_id.clone(),
                 family: rp.family.as_str().to_string(),
@@ -1167,46 +1172,67 @@ async fn run_with_apple(
 
         let cdn_ip_str = cdn_target.ip.to_string();
         let path_cdn_location = rp.cdn_location;
+        let resolver_source = if rp.direct {
+            format!("CF-DoH ({})", cdn_target.source)
+        } else {
+            cdn_target.source.clone()
+        };
 
-        // CN paths have a direct mainland egress; bypass the proxy so build_client uses .resolve() to pin the CDN IP.
-        // Global paths still go through the proxy (if any).
-        let path_proxy = if rp.side == "cn" { None } else { proxy };
-
-        // Build a client with the CDN IP pinned
-        let path_client = match build_client(&parsed, cdn_target.ip, cli_timeout, path_proxy) {
-            Ok(c) => c,
-            Err(e) => {
-                let msg = short_error(&e);
-                crate::tui::send(TuiEvent::PathUpdate {
-                    path_id: path_id.clone(),
-                    current_stage: "failed".to_string(),
-                    cdn_ip: Some(cdn_ip_str.clone()),
-                    cdn_location: path_cdn_location.clone(),
-                    rtt_ms: None, tcp_rtt_ms: None, dl_mbps: None, ul_mbps: None,
-                    error: Some(msg.clone()), done: true,
-                });
-                path_results.push(PathResult {
-                    path_id: path_id.clone(),
-                    family: rp.family.as_str().to_string(),
-                    side: rp.side.clone(),
-                    egress_ip: rp.egress_ip.map(|ip| ip.to_string()),
-                    resolver_source: Some(cdn_target.source.clone()),
-                    cdn_ip: Some(cdn_ip_str),
-                    cdn_location: None,
-                    rtt_ms: None, ping_stats: None,
-                    download_mbps: None, download_stats: None,
-                    upload_mbps: None, download_stages: vec![],
-                    candidates: rp.candidates_report,
-                    error: Some(msg),
-                });
-                continue;
+        // Build the speed-test client:
+        // - Cloudflare (direct): HTTP/1.1 Cloudflare client (no IP pinning needed; __up requires HTTP/1.1)
+        // - Apple: IP-pinned client
+        let path_client = if rp.direct {
+            match build_cloudflare_client(cli_timeout, path_proxy) {
+                Ok(c) => c,
+                Err(e) => {
+                    let msg = short_error(&e);
+                    crate::tui::send(TuiEvent::PathUpdate {
+                        path_id: path_id.clone(), current_stage: "failed".to_string(),
+                        cdn_ip: Some(cdn_ip_str.clone()), cdn_location: path_cdn_location.clone(),
+                        rtt_ms: None, tcp_rtt_ms: None, dl_mbps: None, ul_mbps: None,
+                        error: Some(msg.clone()), done: true,
+                    });
+                    path_results.push(PathResult {
+                        path_id: path_id.clone(), family: rp.family.as_str().to_string(),
+                        side: rp.side.clone(), egress_ip: rp.egress_ip.map(|ip| ip.to_string()),
+                        resolver_source: Some(resolver_source), cdn_ip: Some(cdn_ip_str),
+                        cdn_location: path_cdn_location, rtt_ms: None, ping_stats: None,
+                        download_mbps: None, download_stats: None, upload_mbps: None,
+                        download_stages: vec![], candidates: rp.candidates_report, error: Some(msg),
+                    });
+                    continue;
+                }
+            }
+        } else {
+            match build_client(&parsed, cdn_target.ip, cli_timeout, path_proxy) {
+                Ok(c) => c,
+                Err(e) => {
+                    let msg = short_error(&e);
+                    crate::tui::send(TuiEvent::PathUpdate {
+                        path_id: path_id.clone(), current_stage: "failed".to_string(),
+                        cdn_ip: Some(cdn_ip_str.clone()), cdn_location: path_cdn_location.clone(),
+                        rtt_ms: None, tcp_rtt_ms: None, dl_mbps: None, ul_mbps: None,
+                        error: Some(msg.clone()), done: true,
+                    });
+                    path_results.push(PathResult {
+                        path_id: path_id.clone(), family: rp.family.as_str().to_string(),
+                        side: rp.side.clone(), egress_ip: rp.egress_ip.map(|ip| ip.to_string()),
+                        resolver_source: Some(resolver_source), cdn_ip: Some(cdn_ip_str),
+                        cdn_location: path_cdn_location, rtt_ms: None, ping_stats: None,
+                        download_mbps: None, download_stats: None, upload_mbps: None,
+                        download_stages: vec![], candidates: rp.candidates_report, error: Some(msg),
+                    });
+                    continue;
+                }
             }
         };
 
-        // Always use the domain-name URL regardless of proxy:
-        // - Without proxy: .resolve() in build_client has already pinned the IP; TLS SNI works correctly.
-        // - With proxy: the proxy handles DNS resolution and routing; we do not force an IP, which matches user expectations.
-        let pinned_url = parsed.clone();
+        // Use the domain-name URL (Cloudflare direct uses speed.cloudflare.com; Apple uses pinned URL)
+        let pinned_url = if rp.direct {
+            Url::parse("https://speed.cloudflare.com").unwrap()
+        } else {
+            parsed.clone()
+        };
 
         let mut path_rtt: Option<f64> = None;
         let mut path_tcp_rtt: Option<f64> = None;
@@ -1217,27 +1243,21 @@ async fn run_with_apple(
         let mut path_dl_stages: Vec<crate::report::DownloadStageMetric> = vec![];
         let mut path_error: Option<String> = None;
 
-        // Ping (HTTP RTT + TCP RTT concurrently)
+        // Ping (HTTP RTT + TCP RTT)
         if matches!(&command, Command::Ping { .. } | Command::Full { .. }) {
             crate::tui::send(TuiEvent::PathUpdate {
-                path_id: path_id.clone(),
-                current_stage: "ping".to_string(),
-                cdn_ip: Some(cdn_ip_str.clone()),
-                cdn_location: path_cdn_location.clone(),
+                path_id: path_id.clone(), current_stage: "ping".to_string(),
+                cdn_ip: Some(cdn_ip_str.clone()), cdn_location: path_cdn_location.clone(),
                 rtt_ms: None, tcp_rtt_ms: None, dl_mbps: None, ul_mbps: None, error: None, done: false,
             });
-
-            // TCP ping: connect directly when no proxy; skip when a proxy is present (TCP SYN cannot be forwarded transparently through a proxy)
-            if proxy.is_none() {
-                let host_str = parsed.host_str().unwrap_or("").to_string();
-                let port = parsed.port_or_known_default().unwrap_or(443);
-                if let Ok(tcp_ms) = tcp_ping(&host_str, port, ping_count.min(4)).await {
+            if path_proxy.is_none() {
+                let tcp_host = pinned_url.host_str().unwrap_or("").to_string();
+                let port = pinned_url.port_or_known_default().unwrap_or(443);
+                if let Ok(tcp_ms) = tcp_ping(&tcp_host, port, ping_count.min(4)).await {
                     path_tcp_rtt = Some(tcp_ms);
-                    emit_status(is_json, StatusKind::Ok, path_id,
-                        &format!("[{path_id}] tcp-ping {tcp_ms:.2}ms"));
+                    emit_status(is_json, StatusKind::Ok, path_id, &format!("[{path_id}] tcp-ping {tcp_ms:.2}ms"));
                 }
             }
-
             match measure_ping(&path_client, &pinned_url, ping_count, backend).await {
                 Ok((ms, mut ps)) => {
                     ps.tcp_rtt_ms = path_tcp_rtt;
@@ -1245,10 +1265,8 @@ async fn run_with_apple(
                     path_ping_stats = Some(ps);
                     emit_status(is_json, StatusKind::Ok, path_id, &format!("[{path_id}] http-ping {ms:.2}ms"));
                     crate::tui::send(TuiEvent::PathUpdate {
-                        path_id: path_id.clone(),
-                        current_stage: "ping".to_string(),
-                        cdn_ip: Some(cdn_ip_str.clone()),
-                        cdn_location: path_cdn_location.clone(),
+                        path_id: path_id.clone(), current_stage: "ping".to_string(),
+                        cdn_ip: Some(cdn_ip_str.clone()), cdn_location: path_cdn_location.clone(),
                         rtt_ms: Some(ms), tcp_rtt_ms: path_tcp_rtt, dl_mbps: None, ul_mbps: None, error: None, done: false,
                     });
                 }
@@ -1263,10 +1281,8 @@ async fn run_with_apple(
         // Download
         if matches!(&command, Command::Download { .. } | Command::Full { .. }) {
             crate::tui::send(TuiEvent::PathUpdate {
-                path_id: path_id.clone(),
-                current_stage: "download".to_string(),
-                cdn_ip: Some(cdn_ip_str.clone()),
-                cdn_location: path_cdn_location.clone(),
+                path_id: path_id.clone(), current_stage: "download".to_string(),
+                cdn_ip: Some(cdn_ip_str.clone()), cdn_location: path_cdn_location.clone(),
                 rtt_ms: path_rtt, tcp_rtt_ms: path_tcp_rtt, dl_mbps: None, ul_mbps: None, error: None, done: false,
             });
             match run_download_tests(&path_client, &pinned_url, dl_duration, backend, Some(Box::new({
@@ -1274,13 +1290,12 @@ async fn run_with_apple(
                 let cdn_ip2 = cdn_ip_str.clone();
                 let cdn_loc2 = path_cdn_location.clone();
                 let rtt = path_rtt;
+                let tcp_rtt = path_tcp_rtt;
                 move |v| {
                     crate::tui::send(TuiEvent::PathUpdate {
-                        path_id: path_id2.clone(),
-                        current_stage: "download".to_string(),
-                        cdn_ip: Some(cdn_ip2.clone()),
-                        cdn_location: cdn_loc2.clone(),
-                        rtt_ms: rtt, tcp_rtt_ms: None, dl_mbps: Some(v), ul_mbps: None, error: None, done: false,
+                        path_id: path_id2.clone(), current_stage: "download".to_string(),
+                        cdn_ip: Some(cdn_ip2.clone()), cdn_location: cdn_loc2.clone(),
+                        rtt_ms: rtt, tcp_rtt_ms: tcp_rtt, dl_mbps: Some(v), ul_mbps: None, error: None, done: false,
                     });
                 }
             }))).await {
@@ -1295,10 +1310,8 @@ async fn run_with_apple(
                         path_error = Some("download: all stages failed".to_string());
                     }
                     crate::tui::send(TuiEvent::PathUpdate {
-                        path_id: path_id.clone(),
-                        current_stage: "download".to_string(),
-                        cdn_ip: Some(cdn_ip_str.clone()),
-                        cdn_location: path_cdn_location.clone(),
+                        path_id: path_id.clone(), current_stage: "download".to_string(),
+                        cdn_ip: Some(cdn_ip_str.clone()), cdn_location: path_cdn_location.clone(),
                         rtt_ms: path_rtt, tcp_rtt_ms: path_tcp_rtt, dl_mbps: path_dl, ul_mbps: None, error: None, done: false,
                     });
                 }
@@ -1310,19 +1323,21 @@ async fn run_with_apple(
             }
         }
 
-        // Upload
+        // Upload (Cloudflare: cap at 4 MiB; Apple: use configured ul_mib)
         if matches!(&command, Command::Upload { .. } | Command::Full { .. }) {
+            let ul_mib_eff = if rp.direct { ul_mib.min(4) } else { ul_mib };
             crate::tui::send(TuiEvent::PathUpdate {
-                path_id: path_id.clone(),
-                current_stage: "upload".to_string(),
-                cdn_ip: Some(cdn_ip_str.clone()),
-                cdn_location: path_cdn_location.clone(),
+                path_id: path_id.clone(), current_stage: "upload".to_string(),
+                cdn_ip: Some(cdn_ip_str.clone()), cdn_location: path_cdn_location.clone(),
                 rtt_ms: path_rtt, tcp_rtt_ms: path_tcp_rtt, dl_mbps: path_dl, ul_mbps: None, error: None, done: false,
             });
             let ul_timeout = cli_timeout.max(60);
-            let ul_client = build_client(&parsed, cdn_target.ip, ul_timeout, path_proxy)
-                .unwrap_or(path_client.clone());
-            match measure_upload(&ul_client, &pinned_url, ul_mib, ul_repeat, backend).await {
+            let ul_client = if rp.direct {
+                build_cloudflare_client(ul_timeout, path_proxy).unwrap_or(path_client.clone())
+            } else {
+                build_client(&parsed, cdn_target.ip, ul_timeout, path_proxy).unwrap_or(path_client.clone())
+            };
+            match measure_upload(&ul_client, &pinned_url, ul_mib_eff, ul_repeat, backend).await {
                 Ok((v, _)) => {
                     path_ul = Some(v);
                     emit_status(is_json, StatusKind::Ok, path_id, &format!("[{path_id}] ul {v:.2}Mbps"));
@@ -1337,24 +1352,19 @@ async fn run_with_apple(
 
         // Path completed
         crate::tui::send(TuiEvent::PathUpdate {
-            path_id: path_id.clone(),
-            current_stage: "done".to_string(),
-            cdn_ip: Some(cdn_ip_str.clone()),
-            cdn_location: path_cdn_location.clone(),
+            path_id: path_id.clone(), current_stage: "done".to_string(),
+            cdn_ip: Some(cdn_ip_str.clone()), cdn_location: path_cdn_location.clone(),
             rtt_ms: path_rtt, tcp_rtt_ms: path_tcp_rtt, dl_mbps: path_dl, ul_mbps: path_ul,
             error: path_error.clone(), done: true,
         });
-
-        if path_rtt.is_some() || path_dl.is_some() || path_ul.is_some() {
-            any_success = true;
-        }
+        if path_rtt.is_some() || path_dl.is_some() || path_ul.is_some() { any_success = true; }
 
         path_results.push(PathResult {
             path_id: path_id.clone(),
             family: rp.family.as_str().to_string(),
             side: rp.side.clone(),
             egress_ip: rp.egress_ip.map(|ip| ip.to_string()),
-            resolver_source: Some(cdn_target.source.clone()),
+            resolver_source: Some(resolver_source),
             cdn_ip: Some(cdn_ip_str),
             cdn_location: path_cdn_location,
             rtt_ms: path_rtt,
@@ -1373,11 +1383,21 @@ async fn run_with_apple(
 
     // Extract the best values from multi-path results and fill top-level fields (for backward compatibility)
     let best_path = report.paths.iter()
-        .filter(|p| p.error.is_none())
+        .filter(|p| p.download_mbps.is_some() || p.upload_mbps.is_some() || p.rtt_ms.is_some())
         .max_by(|a, b| {
-            let da = a.download_mbps.unwrap_or(0.0);
-            let db = b.download_mbps.unwrap_or(0.0);
-            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            // Multi-level sort: download (higher=better) → upload (higher=better) → RTT (lower=better)
+            let cmp = a.download_mbps.unwrap_or(0.0)
+                .partial_cmp(&b.download_mbps.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal);
+            if cmp != std::cmp::Ordering::Equal { return cmp; }
+            let cmp = a.upload_mbps.unwrap_or(0.0)
+                .partial_cmp(&b.upload_mbps.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal);
+            if cmp != std::cmp::Ordering::Equal { return cmp; }
+            // RTT: lower is better, so reverse comparison
+            b.rtt_ms.unwrap_or(f64::MAX)
+                .partial_cmp(&a.rtt_ms.unwrap_or(f64::MAX))
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
     if let Some(bp) = best_path {
         if report.rtt_ms.is_none() { report.rtt_ms = bp.rtt_ms; }
@@ -1387,8 +1407,8 @@ async fn run_with_apple(
 
     let code = if any_success { 0 } else { 2 };
 
-    // Full mode: automatically run routing probe after speed test completes
-    if matches!(command, Command::Full { .. }) {
+    // Full mode + JSON: run probe inline (TUI mode runs probe in parallel externally)
+    if matches!(command, Command::Full { .. }) && is_json {
         emit_status(is_json, StatusKind::Info, "probe", "running connectivity probe...");
         let probe_targets = crate::probe::target::all_targets();
         let probe_results = crate::probe::run_probe(probe_targets, 8, 10, proxy, false).await;

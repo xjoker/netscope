@@ -23,7 +23,7 @@ jobs:
             target: aarch64-unknown-linux-musl
             static_name: netscope-linux-aarch64
             cross: true
-          - os: macos-12
+          - os: macos-latest
             target: x86_64-apple-darwin
             static_name: netscope-macos-x86_64
             cross: false
@@ -70,27 +70,21 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          TAG=${GITHUB_REF_NAME}
           BIN=netscope
           TARGET=${{ matrix.target }}
           STATIC=${{ matrix.static_name }}
           mkdir -p dist
-          cp "target/${TARGET}/release/${BIN}" dist/
-          tar -czf "dist/${BIN}-${TAG}-${TARGET}.tar.gz" -C dist "${BIN}"
-          cp "dist/${BIN}-${TAG}-${TARGET}.tar.gz" "dist/${STATIC}.tar.gz"
+          cp "target/${TARGET}/release/${BIN}" "dist/${STATIC}"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $TAG = $env:GITHUB_REF_NAME
           $BIN = "netscope"
           $TARGET = "${{ matrix.target }}"
           $STATIC = "${{ matrix.static_name }}"
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item "target/$TARGET/release/$BIN.exe" dist/
-          Compress-Archive -Path "dist/$BIN.exe" -DestinationPath "dist/$BIN-$TAG-$TARGET.zip"
-          Copy-Item "dist/$BIN-$TAG-$TARGET.zip" "dist/$STATIC.zip"
+          Copy-Item "target/$TARGET/release/$BIN.exe" "dist/$STATIC.exe"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -107,7 +101,17 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Determine pre-release
+        id: meta
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
           generate_release_notes: true

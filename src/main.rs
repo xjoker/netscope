@@ -18,6 +18,12 @@ use crate::probe::types::ProbeReport;
 use crate::probe::{output_probe_report, run_probe};
 use crate::report::output_report;
 use crate::speed::runner::run;
+use crate::tui::state::RetestCmd;
+
+/// Default concurrency for connectivity probe
+const PROBE_CONCURRENCY: usize = 8;
+/// Default timeout (seconds) for each probe target
+const PROBE_TIMEOUT: u64 = 10;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -120,32 +126,48 @@ async fn main() -> ExitCode {
         // Initialise the channel before starting tokio
         let rx = tui::init_channel();
 
-        let tui_mode    = crate::cli::command_name(
+        let is_full = matches!(
+            cli.command.as_ref(),
+            None | Some(Command::Full { .. })
+        );
+        let tui_mode = crate::cli::command_name(
             cli.command.as_ref().unwrap_or(&Command::Full {
-                count: 3,
-                duration: 12,
+                count: 8,
+                duration: 20,
                 ul_mib: 16,
-                ul_repeat: 2,
+                ul_repeat: 3,
             })
         ).to_string();
-        let tui_target  = match cli.backend.as_str() {
-            "cloudflare" => "speed.cloudflare.com".to_string(),
-            _            => "mensura.cdn-apple.com".to_string(),
-        };
-        let tui_timeout = cli.timeout;
         let tui_proxy   = cli.proxy.clone();
         let tui_backend = cli.backend.clone();
 
+        // Retest channel: TUI → main thread
+        let (retest_tx, retest_rx) = std::sync::mpsc::channel::<RetestCmd>();
+
         // Wrap the speed-test task inside a tokio task so the TUI can abort it immediately on q
-        let speed_task = tokio::task::spawn(async move { run(cli).await });
+        let cli_clone = cli.clone();
+        let speed_task = tokio::task::spawn(async move { run(cli_clone).await });
         let abort_handle = speed_task.abort_handle();
+
+        // Full mode: launch connectivity probe in parallel with speed test
+        let (probe_task, probe_abort) = if is_full {
+            let proxy = cli.proxy.clone();
+            let task = tokio::task::spawn(async move {
+                let targets = all_targets();
+                run_probe(targets, PROBE_CONCURRENCY, PROBE_TIMEOUT, proxy.as_deref(), false).await
+            });
+            let abort = task.abort_handle();
+            (Some(task), Some(abort))
+        } else {
+            (None, None)
+        };
 
         // Launch the TUI rendering loop on a dedicated OS thread (crossterm event polling is synchronous/blocking)
         let tui_handle = std::thread::spawn(move || {
-            tui::run_tui_loop(rx, tui_mode, tui_target, tui_timeout, tui_proxy, tui_backend, abort_handle)
+            tui::run_tui_loop(rx, tui_mode, tui_proxy, tui_backend, abort_handle, retest_tx)
         });
 
-        let exit_code = match speed_task.await {
+        let mut exit_code = match speed_task.await {
             Ok(Ok((report, code))) => {
                 tui::send(crate::tui::state::Event::Done {
                     report: Box::new(report),
@@ -154,16 +176,129 @@ async fn main() -> ExitCode {
                 code
             }
             Ok(Err(err)) => {
+                if let Some(a) = &probe_abort { a.abort(); }
                 tui::send(crate::tui::state::Event::Fatal(format!("{err:#}")));
                 2
             }
             // Task was aborted (user pressed q during test)
-            Err(e) if e.is_cancelled() => 130,
+            Err(e) if e.is_cancelled() => {
+                if let Some(a) = &probe_abort { a.abort(); }
+                130
+            }
             Err(e) => {
+                if let Some(a) = &probe_abort { a.abort(); }
                 tui::send(crate::tui::state::Event::Fatal(format!("task panic: {e}")));
                 2
             }
         };
+
+        // Wait for parallel probe task to finish (full mode)
+        if let Some(task) = probe_task {
+            match task.await {
+                Ok(results) => tui::send(crate::tui::state::Event::ProbeDone { results }),
+                Err(_) => tui::send(crate::tui::state::Event::ProbeDone { results: vec![] }),
+            }
+        }
+
+        // Retest loop: spawn retests as parallel tasks so Speed and Probe can run concurrently
+        let mut speed_retest: Option<tokio::task::JoinHandle<(report::Report, u8)>> = None;
+        let mut probe_retest: Option<tokio::task::JoinHandle<Vec<crate::probe::types::ProbeResult>>> = None;
+
+        // Helper closures for dispatching retest commands (eliminates code duplication)
+        let spawn_speed_retest = |cli: &Cli| -> tokio::task::JoinHandle<(report::Report, u8)> {
+            let cli_clone = cli.clone();
+            tokio::task::spawn(async move {
+                match run(cli_clone).await {
+                    Ok((report, code)) => (report, code),
+                    Err(err) => {
+                        tui::send(crate::tui::state::Event::Fatal(format!("{err:#}")));
+                        (report::Report::default(), 2)
+                    }
+                }
+            })
+        };
+        let spawn_probe_retest = |cli: &Cli| -> tokio::task::JoinHandle<Vec<crate::probe::types::ProbeResult>> {
+            let proxy = cli.proxy.clone();
+            tokio::task::spawn(async move {
+                let targets = all_targets();
+                run_probe(targets, PROBE_CONCURRENCY, PROBE_TIMEOUT, proxy.as_deref(), false).await
+            })
+        };
+
+        'retest: loop {
+            // Drain all pending retest commands (non-blocking)
+            loop {
+                match retest_rx.try_recv() {
+                    Ok(RetestCmd::Speed) if speed_retest.is_none() => {
+                        speed_retest = Some(spawn_speed_retest(&cli));
+                    }
+                    Ok(RetestCmd::Probe) if probe_retest.is_none() => {
+                        probe_retest = Some(spawn_probe_retest(&cli));
+                    }
+                    Ok(_) => {} // duplicate command while already running, ignore
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // TUI closed — wait for any in-flight tasks then exit
+                        if let Some(task) = speed_retest.take() {
+                            if let Ok((_, code)) = task.await {
+                                exit_code = code;
+                            }
+                        }
+                        if let Some(task) = probe_retest.take() {
+                            let _ = task.await;
+                        }
+                        break 'retest;
+                    }
+                }
+            }
+
+            // Check if any in-flight retest tasks have completed
+            if speed_retest.as_ref().map_or(false, |t| t.is_finished()) {
+                let task = speed_retest.take().unwrap();
+                match task.await {
+                    Ok((report, code)) => {
+                        exit_code = code;
+                        tui::send(crate::tui::state::Event::Done {
+                            report: Box::new(report), code,
+                        });
+                    }
+                    Err(_) => {
+                        tui::send(crate::tui::state::Event::Fatal("speed retest panic".to_string()));
+                        exit_code = 2;
+                    }
+                }
+            }
+            if probe_retest.as_ref().map_or(false, |t| t.is_finished()) {
+                let task = probe_retest.take().unwrap();
+                match task.await {
+                    Ok(results) => tui::send(crate::tui::state::Event::ProbeDone { results }),
+                    Err(_) => tui::send(crate::tui::state::Event::ProbeDone { results: vec![] }),
+                }
+            }
+
+            // Wait for next command or timeout
+            if speed_retest.is_none() && probe_retest.is_none() {
+                // No in-flight tasks → block with timeout to avoid busy-spinning
+                match retest_rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                    Ok(cmd) => {
+                        match cmd {
+                            RetestCmd::Speed if speed_retest.is_none() => {
+                                speed_retest = Some(spawn_speed_retest(&cli));
+                            }
+                            RetestCmd::Probe if probe_retest.is_none() => {
+                                probe_retest = Some(spawn_probe_retest(&cli));
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break 'retest,
+                }
+            } else {
+                // In-flight tasks exist; poll briefly
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
 
         // Wait for the TUI thread to exit (user confirms with a keypress)
         let _ = tui_handle.join();

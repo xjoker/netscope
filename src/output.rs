@@ -69,15 +69,10 @@ pub fn box_sep_row(c: &Colors) {
 }
 
 pub fn emit_status(is_json: bool, kind: StatusKind, step: &str, message: &str) {
-    if is_json {
-        let tag = match kind { StatusKind::Info => "INFO", StatusKind::Ok => "OK  ", StatusKind::Error => "ERR " };
-        eprintln!("[{tag}] {step:<10} {message}");
-        return;
-    }
-    // Silent in TUI mode: already rendered on alternate screen, skip stdout
-    if crate::tui::global_tx().is_some() {
-        return;
-    }
+    // JSON mode: all progress is suppressed; only the final JSON blob goes to stdout
+    if is_json { return; }
+    // TUI mode: events are sent via channel, not printed
+    if crate::tui::global_tx().is_some() { return; }
 
     let c = Colors::new();
     let (sym, col) = match kind {
@@ -90,10 +85,8 @@ pub fn emit_status(is_json: bool, kind: StatusKind, step: &str, message: &str) {
 }
 
 pub fn emit_start_banner(is_json: bool, mode: &str, base_url: &Url, timeout: u64) {
-    if is_json {
-        eprintln!("[INFO] starting mode={mode} target={base_url} timeout={timeout}s");
-        return;
-    }
+    // JSON mode: suppress banner entirely (final JSON is the only stdout output)
+    if is_json { return; }
     // Skip banner in TUI mode
     if crate::tui::global_tx().is_some() {
         return;
@@ -106,9 +99,9 @@ pub fn emit_start_banner(is_json: bool, mode: &str, base_url: &Url, timeout: u64
     box_top(&c);
 
     // Title row
-    let title_raw  = format!("netscope  v{ver}");
+    let title_raw  = format!("netscope  {ver}");
     let mode_raw   = format!("mode: {mode}");
-    let title_col  = format!("{}{}netscope{} {}{}v{ver}{}", c.bold, c.white, c.reset, c.dim, c.cyan, c.reset);
+    let title_col  = format!("{}{}netscope{} {}{}{ver}{}", c.bold, c.white, c.reset, c.dim, c.cyan, c.reset);
     let mode_col   = format!("{}mode: {}{}{mode}{}", c.dim, c.reset, c.cyan, c.reset);
     let inner_raw  = format!("{title_raw}  {mode_raw}");
     let inner_col  = format!("{title_col}  {mode_col}");

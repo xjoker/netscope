@@ -123,13 +123,6 @@ fn ecs_subnet_from_ip(ip: IpAddr) -> String {
     }
 }
 
-pub async fn resolve_host_ip(host: &str) -> Option<IpAddr> {
-    let mut ips = Vec::new();
-    for addr in tokio::net::lookup_host((host, 443)).await.ok()? {
-        ips.push(addr.ip());
-    }
-    ips.into_iter().next()
-}
 
 fn provider_list(country: Option<&str>) -> &'static [DohProvider] {
     match country {
