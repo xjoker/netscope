@@ -8,6 +8,9 @@ use ratatui::{
 
 use crate::tui::state::AppState;
 
+/// Theme accent color — 256-color teal (#008787), legible on both light and dark backgrounds.
+const ACCENT: Color = Color::Indexed(30);
+
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 fn spin(tick: u64) -> &'static str {
@@ -16,10 +19,10 @@ fn spin(tick: u64) -> &'static str {
 
 
 fn cyan_bold(s: impl Into<String>) -> Span<'static> {
-    Span::styled(s.into(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+    Span::styled(s.into(), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
 }
 fn white_bold(s: impl Into<String>) -> Span<'static> {
-    Span::styled(s.into(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+    Span::styled(s.into(), Style::default().fg(Color::Reset).add_modifier(Modifier::BOLD))
 }
 fn dim(s: impl Into<String>) -> Span<'static> {
     Span::styled(s.into(), Style::default().fg(Color::DarkGray))
@@ -68,7 +71,7 @@ fn render_scrollable_panel(
 
     let scroll_hint = scroll_hint_text(has_above, has_below);
 
-    let border_col = if is_focused { Color::Cyan } else { Color::DarkGray };
+    let border_col = if is_focused { ACCENT } else { Color::DarkGray };
     let mut block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -147,14 +150,14 @@ fn build_header_segments(state: &AppState) -> (Vec<Span<'static>>, Vec<Span<'sta
 
     let backend_upper = state.backend.to_uppercase();
     let (badge_text, badge_col) = if state.backend == "cloudflare" {
-        (format!(" {backend_upper} "), Color::LightYellow)
+        (format!(" {backend_upper} "), Color::Yellow)
     } else {
-        (format!(" {backend_upper} "), Color::Cyan)
+        (format!(" {backend_upper} "), ACCENT)
     };
 
     let cn_badge: Option<(&str, Color)> = match state.cn_mode {
         Some(true)  => Some((" CN Mode ", Color::LightRed)),
-        Some(false) => Some((" Global  ", Color::Blue)),
+        Some(false) => Some((" Global  ", Color::Indexed(67))),
         None        => None,
     };
 
@@ -177,7 +180,7 @@ fn build_header_segments(state: &AppState) -> (Vec<Span<'static>>, Vec<Span<'sta
     let mut v4: Vec<Span> = Vec::new();
     if !state.egress_done {
         v4.push(dim("  "));
-        v4.push(Span::styled(spin(state.tick).to_string(), Style::default().fg(Color::Cyan)));
+        v4.push(Span::styled(spin(state.tick).to_string(), Style::default().fg(ACCENT)));
         v4.push(dim(" detecting..."));
     } else {
         egress_inline_spans(&mut v4, "v4",
@@ -427,7 +430,7 @@ fn draw_speed_panel(f: &mut Frame, area: Rect, state: &AppState) {
                  green_bold(format!("{:<10}", row.path_id)))
             } else {
                 let stage_s = format!("{} {}", spin(tick), row.current_stage);
-                (Span::styled(format!("{:<16}", stage_s), Style::default().fg(Color::Cyan)),
+                (Span::styled(format!("{:<16}", stage_s), Style::default().fg(ACCENT)),
                  cyan_bold(format!("{:<10}", row.path_id)))
             };
 
@@ -440,7 +443,7 @@ fn draw_speed_panel(f: &mut Frame, area: Rect, state: &AppState) {
             };
             let cdn_truncated: String = cdn_raw.chars().take(cdn_w).collect();
             let cdn_span = if row.cdn_ip.is_some() {
-                Span::styled(format!("{:<cdn_w$}", cdn_truncated), Style::default().fg(Color::White))
+                Span::styled(format!("{:<cdn_w$}", cdn_truncated), Style::default().fg(Color::Reset))
             } else if row.done && row.error.is_some() {
                 Span::styled(format!("{:<cdn_w$}", cdn_truncated), Style::default().fg(Color::Red))
             } else {
@@ -463,22 +466,22 @@ fn draw_speed_panel(f: &mut Frame, area: Rect, state: &AppState) {
             let dl_span = if let Some(mbps) = row.dl_mbps {
                 let bar = speed_bar(mbps, 1000.0, 4);
                 Span::styled(format!("{bar} {:>5.1}Mbps", mbps),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
             } else {
                 let is_dl = row.current_stage.contains("download");
                 if !row.done && is_dl {
-                    Span::styled(format!("{:<14}", format!("{} ...", spin(tick))), Style::default().fg(Color::Cyan))
+                    Span::styled(format!("{:<14}", format!("{} ...", spin(tick))), Style::default().fg(ACCENT))
                 } else {
                     dim(format!("{:>14}", if row.done { if row.error.is_some() { "✗" } else { "-" } } else { "" }))
                 }
             };
 
             let ul_span = if let Some(mbps) = row.ul_mbps {
-                Span::styled(format!("{:>4.1}Mbps", mbps), Style::default().fg(Color::White))
+                Span::styled(format!("{:>4.1}Mbps", mbps), Style::default().fg(Color::Reset))
             } else {
                 let is_ul = row.current_stage.contains("upload");
                 if !row.done && is_ul {
-                    Span::styled(format!("{:<10}", format!("{} ...", spin(tick))), Style::default().fg(Color::Cyan))
+                    Span::styled(format!("{:<10}", format!("{} ...", spin(tick))), Style::default().fg(ACCENT))
                 } else {
                     dim(format!("{:>10}", if row.done { if row.error.is_some() { "✗" } else { "-" } } else { "" }))
                 }
@@ -503,13 +506,13 @@ fn draw_speed_panel(f: &mut Frame, area: Rect, state: &AppState) {
                 "░".repeat(20 - bar_filled),
             );
             lines.push(Line::from(vec![
-                Span::styled(bar, Style::default().fg(if done == total { Color::Green } else { Color::Cyan })),
+                Span::styled(bar, Style::default().fg(if done == total { Color::Green } else { ACCENT })),
             ]));
         }
     } else {
         // Pre-test or single-path: show waiting/resolving status
         lines.push(Line::from(vec![
-            Span::styled(spin(tick).to_string(), Style::default().fg(Color::Cyan)),
+            Span::styled(spin(tick).to_string(), Style::default().fg(ACCENT)),
             dim("  preparing speed test..."),
         ]));
         if state.backend == "cloudflare" {
@@ -548,7 +551,7 @@ fn draw_connectivity_panel(f: &mut Frame, area: Rect, state: &AppState) {
     } else {
         // Empty fallback: render an empty bordered panel so the area isn't blank
         let is_focused = state.result_focus == crate::tui::state::ResultFocus::Connectivity;
-        let border_col = if is_focused { Color::Cyan } else { Color::DarkGray };
+        let border_col = if is_focused { ACCENT } else { Color::DarkGray };
         let block = Block::default()
             .title(Line::from(vec![
                 Span::raw(" "),
@@ -651,10 +654,10 @@ fn draw_unified_footer(f: &mut Frame, area: Rect, state: &AppState) {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Cyan));
+            .border_style(Style::default().fg(ACCENT));
         let para = Paragraph::new(Line::from(vec![
             Span::raw(" "),
-            Span::styled(spin(state.tick).to_string(), Style::default().fg(Color::Cyan)),
+            Span::styled(spin(state.tick).to_string(), Style::default().fg(ACCENT)),
             dim(format!("  {label}   q to quit")),
         ])).block(block);
         f.render_widget(para, area);
@@ -673,9 +676,9 @@ fn draw_unified_footer(f: &mut Frame, area: Rect, state: &AppState) {
         .border_style(Style::default().fg(Color::DarkGray));
     let para = Paragraph::new(Line::from(vec![
         Span::raw(" "),
-        Span::styled(spin(state.tick).to_string(), Style::default().fg(Color::Cyan)),
+        Span::styled(spin(state.tick).to_string(), Style::default().fg(ACCENT)),
         Span::raw("  "),
-        Span::styled(bar, Style::default().fg(Color::Cyan)),
+        Span::styled(bar, Style::default().fg(ACCENT)),
         dim(format!("  {done_steps}/{total_steps}  {stage_label}   q to quit")),
     ])).block(block);
     f.render_widget(para, area);
@@ -702,7 +705,7 @@ fn draw_result_body(f: &mut Frame, area: Rect, state: &AppState, report: &crate:
         if has_region {
             lines.push(Line::from(vec![
                 dim(format!("{:<10}", "Region")),
-                Span::styled(region_s, Style::default().fg(Color::White)),
+                Span::styled(region_s, Style::default().fg(Color::Reset)),
             ]));
         }
         // Split routing warning
@@ -767,12 +770,12 @@ fn draw_result_body(f: &mut Frame, area: Rect, state: &AppState, report: &crate:
                     .map(|v| Span::styled(format!("{v:>5.1}ms"), Style::default().fg(rtt_color(v))))
                     .unwrap_or_else(|| dim(format!("{:>7}", "-")));
                 (cyan_bold(format!("{:<9}", path.path_id)),
-                 Span::styled(format!("{:<16}", cdn_ip_s), Style::default().fg(Color::White)),
+                 Span::styled(format!("{:<16}", cdn_ip_s), Style::default().fg(Color::Reset)),
                  green(format!("{:<loc_w$}", location_s)),
                  ping_span,
                  tcp_span,
-                 Span::styled(dl_s.clone(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                 Span::styled(ul_s.clone(), Style::default().fg(Color::White)))
+                 Span::styled(dl_s.clone(), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                 Span::styled(ul_s.clone(), Style::default().fg(Color::Reset)))
             };
 
             lines.push(Line::from(vec![
@@ -792,7 +795,7 @@ fn draw_result_body(f: &mut Frame, area: Rect, state: &AppState, report: &crate:
                         lines.push(Line::from(vec![
                             dim(format!("{}{:<LBL$}", INDENT, "HTTP-RTT")),
                             dim("(http)  "),
-                            Span::styled(spark, Style::default().fg(Color::Cyan)),
+                            Span::styled(spark, Style::default().fg(ACCENT)),
                         ]));
                         lines.push(Line::from(vec![
                             dim(format!("{}{:<LBL$}", INDENT, "")),
@@ -830,7 +833,7 @@ fn draw_result_body(f: &mut Frame, area: Rect, state: &AppState, report: &crate:
                             let filled = ((mbps / max_mbps) * BAR_W as f64).round() as usize;
                             lines.push(Line::from(vec![
                                 dim(format!("{}{:<LBL$}", INDENT, s.name)),
-                                Span::styled("█".repeat(filled.min(BAR_W)), Style::default().fg(Color::Cyan)),
+                                Span::styled("█".repeat(filled.min(BAR_W)), Style::default().fg(ACCENT)),
                                 Span::styled("░".repeat(BAR_W - filled.min(BAR_W)), Style::default().fg(Color::DarkGray)),
                                 dim(format!("  {:.1} Mbps", mbps)),
                             ]));
@@ -858,7 +861,7 @@ fn draw_result_body(f: &mut Frame, area: Rect, state: &AppState, report: &crate:
         let region_s = report.resolver_country.as_deref()
             .map(|cc| if cc == "CN" { format!("{cc} (Mainland CN)") } else { cc.to_string() });
         if let Some(r) = region_s {
-            lines.push(Line::from(vec![dim(format!("{:<12}", region_label)), color(r, Color::White)]));
+            lines.push(Line::from(vec![dim(format!("{:<12}", region_label)), color(r, Color::Reset)]));
         }
         if let Some(ip) = &report.selected_ip {
             let family = report.selected_family.as_deref().unwrap_or("-");
@@ -875,7 +878,7 @@ fn draw_result_body(f: &mut Frame, area: Rect, state: &AppState, report: &crate:
         let metric_row = |ok: bool, label: &str, value: String| -> Line<'static> {
             let (icon, val_span) = if ok {
                 (Span::styled("✓", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                 Span::styled(value, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)))
+                 Span::styled(value, Style::default().fg(Color::Reset).add_modifier(Modifier::BOLD)))
             } else {
                 (Span::styled("✗", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
                  Span::styled(value, Style::default().fg(Color::Red)))
@@ -900,7 +903,7 @@ fn draw_result_body(f: &mut Frame, area: Rect, state: &AppState, report: &crate:
                     let spark = ping_sparkline(&ps.samples);
                     lines.push(Line::from(vec![
                         dim("   Trend "),
-                        Span::styled(spark, Style::default().fg(Color::Cyan)),
+                        Span::styled(spark, Style::default().fg(ACCENT)),
                     ]));
                     let tcp_info = ps.tcp_rtt_ms.map(|v| format!("  tcp {v:.1}ms")).unwrap_or_default();
                     lines.push(Line::from(vec![
@@ -928,9 +931,9 @@ fn draw_result_body(f: &mut Frame, area: Rect, state: &AppState, report: &crate:
                     let filled = ((mbps / max_mbps) * BAR_W as f64).round() as usize;
                     lines.push(Line::from(vec![
                         dim(format!("   {:<8}", s.name)),
-                        Span::styled("█".repeat(filled.min(BAR_W)), Style::default().fg(Color::Cyan)),
+                        Span::styled("█".repeat(filled.min(BAR_W)), Style::default().fg(ACCENT)),
                         Span::styled("░".repeat(BAR_W - filled.min(BAR_W)), Style::default().fg(Color::DarkGray)),
-                        Span::styled(format!(" {:.1} Mbps", mbps), Style::default().fg(Color::White)),
+                        Span::styled(format!(" {:.1} Mbps", mbps), Style::default().fg(Color::Reset)),
                     ]));
                 }
             }
@@ -987,9 +990,9 @@ fn draw_probe_progress_panel(f: &mut Frame, area: Rect, state: &AppState) {
     let filled = if total > 0 { (done * bar_w) / total } else { 0 };
     let bar = format!("[{}{}]", "█".repeat(filled), "░".repeat(bar_w - filled));
     lines.push(Line::from(vec![
-        Span::styled(spin(state.tick).to_string(), Style::default().fg(Color::Cyan)),
+        Span::styled(spin(state.tick).to_string(), Style::default().fg(ACCENT)),
         dim("  "),
-        Span::styled(bar, Style::default().fg(Color::Cyan)),
+        Span::styled(bar, Style::default().fg(ACCENT)),
         dim(format!("  {done}/{total}  probing...")),
     ]));
 
@@ -1007,7 +1010,7 @@ fn draw_probe_progress_panel(f: &mut Frame, area: Rect, state: &AppState) {
         let mut cur_spans: Vec<Span> = vec![
             Span::styled(
                 cat_pad.clone(),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Reset).add_modifier(Modifier::BOLD),
             ),
         ];
         let mut cur_w: usize = CAT_W;
@@ -1151,7 +1154,7 @@ fn draw_probe_panel(
         let mut cur_spans: Vec<Span> = vec![
             Span::styled(
                 cat_pad.clone(),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Reset).add_modifier(Modifier::BOLD),
             ),
         ];
         let mut cur_w: usize = CAT_W;
