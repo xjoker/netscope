@@ -52,7 +52,12 @@ async fn sample_ttfb(client: &Client, url: &str) -> Option<f64> {
     let t = Instant::now();
     match client.get(url).send().await {
         Ok(resp) if resp.status().as_u16() < 500 => {
-            Some(t.elapsed().as_secs_f64() * 1000.0)
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            // Consume the response body so the HTTP/1.1 connection can be
+            // returned to the pool and reused by subsequent samples.
+            // Without this, each sample re-establishes TCP+TLS (~100-300ms overhead).
+            let _ = resp.bytes().await;
+            Some(ms)
         }
         _ => None,
     }
@@ -106,19 +111,22 @@ async fn probe_trace(client: &Client, target: &ProbeTarget, timeout_secs: u64) -
             let first_ms = start.elapsed().as_secs_f64() * 1000.0;
             let status_code = resp.status().as_u16();
             if !resp.status().is_success() {
-                // non-2xx → report with the first-request latency (don't fallback to same URL)
+                // Non-2xx: the server responded, so the site IS reachable at the network level.
+                // The /cdn-cgi/trace endpoint may be disabled (403/404) — that doesn't mean
+                // the site is blocked. Only timeouts and connection failures indicate blocking.
+                let ttfb_ms = avg_ttfb(client, target.url, first_ms).await;
                 return ProbeResult {
                     name: target.name.to_string(),
                     category: target.category.to_string(),
                     url: target.url.to_string(),
-                    reachable: false,
+                    reachable: true,
                     status_code: Some(status_code),
-                    ttfb_ms: Some(first_ms),
+                    ttfb_ms: Some(ttfb_ms),
                     exit_ip: None,
                     colo: None,
                     loc: None,
                     geo: None,
-                    error: Some(format!("HTTP {status_code}")),
+                    error: None,
                 };
             }
             let body = match resp.text().await {

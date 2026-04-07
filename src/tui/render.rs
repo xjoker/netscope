@@ -343,7 +343,7 @@ fn shorten_geo(geo: &str) -> String {
 // Panel area: Speed Panel (progress or results) + Connectivity Panel (full mode)
 // ═══════════════════════════════════════════════════════════════
 
-pub fn draw_unified(f: &mut Frame, state: &AppState) {
+pub fn draw_unified(f: &mut Frame, state: &mut AppState) {
     let area = f.area();
 
     // Header: single horizontal line (no block borders)
@@ -362,13 +362,16 @@ pub fn draw_unified(f: &mut Frame, state: &AppState) {
 
     draw_header(f, chunks[0], state);
 
-    // Panel area: full mode → split 50/50 when Connectivity has content
+    // Panel area: full mode → show Speed + Connectivity
+    // Widescreen (>= 140 cols): side-by-side horizontal layout
+    // Narrowscreen: stacked vertical 50/50
     let has_conn_content = !state.probe_results.is_empty()
         || !state.partial_probe_results.is_empty()
         || state.probe_progress.is_some();
     if state.mode == "full" && has_conn_content {
+        let wide = area.width >= 140;
         let body_chunks = Layout::default()
-            .direction(Direction::Vertical)
+            .direction(if wide { Direction::Horizontal } else { Direction::Vertical })
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(chunks[1]);
         draw_speed_panel(f, body_chunks[0], state);
@@ -382,10 +385,13 @@ pub fn draw_unified(f: &mut Frame, state: &AppState) {
 
 // ── Speed Panel: progress and results in the same "Speed Results" block ──
 
-fn draw_speed_panel(f: &mut Frame, area: Rect, state: &AppState) {
+fn draw_speed_panel(f: &mut Frame, area: Rect, state: &mut AppState) {
     if state.speed_done {
-        if let Some(report) = &state.final_report {
-            draw_result_body(f, area, state, report);
+        if state.final_report.is_some() {
+            // Temporarily take the report to avoid borrowing state and report simultaneously
+            let report = state.final_report.take().unwrap();
+            draw_result_body(f, area, state, &report);
+            state.final_report = Some(report);
             return;
         }
     }
@@ -530,24 +536,29 @@ fn draw_speed_panel(f: &mut Frame, area: Rect, state: &AppState) {
         dim(format!("  {} {}/{}", stage_label, done_steps, total_steps)),
         Span::raw(" "),
     ]);
-    render_scrollable_panel(f, area, title, lines, state.scroll_speed, is_focused);
+    state.scroll_speed = render_scrollable_panel(f, area, title, lines, state.scroll_speed, is_focused);
 }
 
 // ── Connectivity Panel: routes between progress / results ──
 
-fn draw_connectivity_panel(f: &mut Frame, area: Rect, state: &AppState) {
+fn draw_connectivity_panel(f: &mut Frame, area: Rect, state: &mut AppState) {
     if !state.probe_results.is_empty() {
-        draw_probe_panel(f, area, state, &state.probe_results);
+        // Temporarily take to avoid simultaneous borrow of state and state.probe_results
+        let results = std::mem::take(&mut state.probe_results);
+        draw_probe_panel(f, area, state, &results);
+        state.probe_results = results;
     } else if let Some((done, total)) = state.probe_progress {
         if total > 0 && done >= total && !state.partial_probe_results.is_empty() {
-            // All probes finished via ProbePartial but ProbeDone not yet received
-            draw_probe_panel(f, area, state, &state.partial_probe_results);
+            let results = std::mem::take(&mut state.partial_probe_results);
+            draw_probe_panel(f, area, state, &results);
+            state.partial_probe_results = results;
         } else {
             draw_probe_progress_panel(f, area, state);
         }
     } else if !state.partial_probe_results.is_empty() {
-        // Fallback: partial results exist but no progress tracking — render what we have
-        draw_probe_panel(f, area, state, &state.partial_probe_results);
+        let results = std::mem::take(&mut state.partial_probe_results);
+        draw_probe_panel(f, area, state, &results);
+        state.partial_probe_results = results;
     } else {
         // Empty fallback: render an empty bordered panel so the area isn't blank
         let is_focused = state.result_focus == crate::tui::state::ResultFocus::Connectivity;
@@ -629,9 +640,9 @@ fn draw_unified_footer(f: &mut Frame, area: Rect, state: &AppState) {
     if state.finished && !state.retesting_speed && !state.retesting_probe {
         let code = state.exit_code;
         let (col, text) = if code == 0 {
-            (Color::Green, format!("✓  done  Exit {code}   Tab: switch panel  r: retest  ↑↓/jk: scroll  q: quit"))
+            (Color::Green, format!("✓  done  Exit {code}   Tab: switch panel  b: switch backend  r: retest  ↑↓/jk: scroll  q: quit"))
         } else {
-            (Color::Yellow, format!("⚠  partial  Exit {code}   Tab: switch panel  r: retest  ↑↓/jk: scroll  q: quit"))
+            (Color::Yellow, format!("⚠  partial  Exit {code}   Tab: switch panel  b: switch backend  r: retest  ↑↓/jk: scroll  q: quit"))
         };
         let block = Block::default()
             .borders(Borders::ALL)
@@ -689,7 +700,7 @@ fn draw_unified_footer(f: &mut Frame, area: Rect, state: &AppState) {
 // Speed result body (reused by draw_speed_panel when speed_done)
 // ═══════════════════════════════════════════════════════════════
 
-fn draw_result_body(f: &mut Frame, area: Rect, state: &AppState, report: &crate::report::Report) {
+fn draw_result_body(f: &mut Frame, area: Rect, state: &mut AppState, report: &crate::report::Report) {
     let result_width = area.width.saturating_sub(4) as usize; // subtract borders + padding
 
     // Build lines first so we know total count before rendering the block
@@ -965,12 +976,12 @@ fn draw_result_body(f: &mut Frame, area: Rect, state: &AppState, report: &crate:
     // Build block — focus border + scroll hint in bottom-right corner
     let is_focused = state.result_focus == crate::tui::state::ResultFocus::Speed;
     let title = Line::from(vec![Span::raw(" "), cyan_bold("Speed Results"), Span::raw(" ")]);
-    render_scrollable_panel(f, area, title, lines, state.scroll_speed, is_focused);
+    state.scroll_speed = render_scrollable_panel(f, area, title, lines, state.scroll_speed, is_focused);
 }
 
 // ── Connectivity probe in-progress panel ─────────────────────────────────────
 
-fn draw_probe_progress_panel(f: &mut Frame, area: Rect, state: &AppState) {
+fn draw_probe_progress_panel(f: &mut Frame, area: Rect, state: &mut AppState) {
     let is_focused = state.result_focus == crate::tui::state::ResultFocus::Connectivity;
     let inner_w = area.width.saturating_sub(4) as usize;
 
@@ -1079,7 +1090,7 @@ fn draw_probe_progress_panel(f: &mut Frame, area: Rect, state: &AppState) {
         dim(format!("  probing {done}/{total}...")),
         Span::raw(" "),
     ]);
-    render_scrollable_panel(f, area, title, lines, state.scroll_conn, is_focused);
+    state.scroll_conn = render_scrollable_panel(f, area, title, lines, state.scroll_conn, is_focused);
 }
 
 // ── Connectivity probe results panel ─────────────────────────
@@ -1109,7 +1120,7 @@ fn probe_category_label(cat: &str) -> &str {
 fn draw_probe_panel(
     f: &mut Frame,
     area: Rect,
-    state: &AppState,
+    state: &mut AppState,
     results: &[crate::probe::types::ProbeResult],
 ) {
     let is_focused = state.result_focus == crate::tui::state::ResultFocus::Connectivity;
@@ -1227,7 +1238,7 @@ fn draw_probe_panel(
         dim("  ● ok  ○ blocked  ms = TTFB  country from cdn-cgi/trace or GeoIP"),
         Span::raw(" "),
     ]);
-    render_scrollable_panel(f, area, title, lines, state.scroll_conn, is_focused);
+    state.scroll_conn = render_scrollable_panel(f, area, title, lines, state.scroll_conn, is_focused);
 }
 
 

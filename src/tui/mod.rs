@@ -72,7 +72,7 @@ pub fn run_tui_loop(
         state.tick = state.tick.wrapping_add(1);
 
         // Render — always use unified view
-        term.draw(|f| draw_unified(f, &state))?;
+        term.draw(|f| draw_unified(f, &mut state))?;
 
         // Wait for a keyboard event (with timeout)
         if event::poll(tick_ms)? {
@@ -105,9 +105,9 @@ pub fn run_tui_loop(
                         };
                         if let Some(cmd) = cmd {
                             // Send first — only modify state if the channel is still open
-                            if retest_tx.send(cmd).is_ok() {
-                                match cmd {
-                                    RetestCmd::Speed => {
+                            if retest_tx.send(cmd.clone()).is_ok() {
+                                match &cmd {
+                                    RetestCmd::Speed | RetestCmd::SpeedWithBackend(_) => {
                                         state.speed_done = false;
                                         state.finished = false;
                                         state.retesting_speed = true;
@@ -129,6 +129,29 @@ pub fn run_tui_loop(
                                         state.retesting_probe = true;
                                     }
                                 }
+                            }
+                        }
+                    }
+                    // b/B: switch backend and retest speed (only when speed test is done)
+                    KeyCode::Char('b') | KeyCode::Char('B') => {
+                        if state.speed_done && !state.retesting_speed {
+                            let new_backend = if state.backend == "apple" {
+                                "cloudflare".to_string()
+                            } else {
+                                "apple".to_string()
+                            };
+                            let cmd = RetestCmd::SpeedWithBackend(new_backend.clone());
+                            if retest_tx.send(cmd).is_ok() {
+                                state.backend = new_backend;
+                                state.speed_done = false;
+                                state.finished = false;
+                                state.retesting_speed = true;
+                                state.final_report = None;
+                                state.paths.clear();
+                                state.scroll_speed = 0;
+                                state.ping_status = StageStatus::Waiting;
+                                state.download_status = StageStatus::Waiting;
+                                state.upload_status = StageStatus::Waiting;
                             }
                         }
                     }

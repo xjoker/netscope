@@ -217,6 +217,19 @@ async fn main() -> ExitCode {
                 }
             })
         };
+        let spawn_speed_retest_backend = |cli: &Cli, backend: String| -> tokio::task::JoinHandle<(report::Report, u8)> {
+            let mut cli_clone = cli.clone();
+            cli_clone.backend = backend;
+            tokio::task::spawn(async move {
+                match run(cli_clone).await {
+                    Ok((report, code)) => (report, code),
+                    Err(err) => {
+                        tui::send(crate::tui::state::Event::Fatal(format!("{err:#}")));
+                        (report::Report::default(), 2)
+                    }
+                }
+            })
+        };
         let spawn_probe_retest = |cli: &Cli| -> tokio::task::JoinHandle<Vec<crate::probe::types::ProbeResult>> {
             let proxy = cli.proxy.clone();
             tokio::task::spawn(async move {
@@ -231,6 +244,9 @@ async fn main() -> ExitCode {
                 match retest_rx.try_recv() {
                     Ok(RetestCmd::Speed) if speed_retest.is_none() => {
                         speed_retest = Some(spawn_speed_retest(&cli));
+                    }
+                    Ok(RetestCmd::SpeedWithBackend(ref backend)) if speed_retest.is_none() => {
+                        speed_retest = Some(spawn_speed_retest_backend(&cli, backend.clone()));
                     }
                     Ok(RetestCmd::Probe) if probe_retest.is_none() => {
                         probe_retest = Some(spawn_probe_retest(&cli));
@@ -284,6 +300,9 @@ async fn main() -> ExitCode {
                         match cmd {
                             RetestCmd::Speed if speed_retest.is_none() => {
                                 speed_retest = Some(spawn_speed_retest(&cli));
+                            }
+                            RetestCmd::SpeedWithBackend(ref backend) if speed_retest.is_none() => {
+                                speed_retest = Some(spawn_speed_retest_backend(&cli, backend.clone()));
                             }
                             RetestCmd::Probe if probe_retest.is_none() => {
                                 probe_retest = Some(spawn_probe_retest(&cli));

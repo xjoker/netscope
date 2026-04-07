@@ -1,10 +1,12 @@
 use crate::report::Report;
 
 /// Command sent from TUI back to main thread to trigger a retest
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum RetestCmd {
     Speed,
     Probe,
+    /// Retest speed with a different backend (e.g. "apple" or "cloudflare")
+    SpeedWithBackend(String),
 }
 
 /// Status of each stage
