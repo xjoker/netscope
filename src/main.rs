@@ -123,89 +123,25 @@ async fn main() -> ExitCode {
 
     // Speed-test flow: launch TUI in non-JSON mode
     if !is_json {
-        // Initialise the channel before starting tokio
         let rx = tui::init_channel();
 
-        let is_full = matches!(
-            cli.command.as_ref(),
-            None | Some(Command::Full { .. })
-        );
         let tui_mode = crate::cli::command_name(
             cli.command.as_ref().unwrap_or(&Command::Full {
-                count: 8,
-                duration: 20,
-                ul_mib: 16,
-                ul_repeat: 3,
+                count: 8, duration: 20, ul_mib: 16, ul_repeat: 3,
             })
         ).to_string();
         let tui_proxy   = cli.proxy.clone();
         let tui_backend = cli.backend.clone();
 
-        // Retest channel: TUI → main thread
         let (retest_tx, retest_rx) = std::sync::mpsc::channel::<RetestCmd>();
 
-        // Wrap the speed-test task inside a tokio task so the TUI can abort it immediately on q
-        let cli_clone = cli.clone();
-        let speed_task = tokio::task::spawn(async move { run(cli_clone).await });
-        let abort_handle = speed_task.abort_handle();
-
-        // Full mode: launch connectivity probe in parallel with speed test
-        let (probe_task, probe_abort) = if is_full {
-            let proxy = cli.proxy.clone();
-            let task = tokio::task::spawn(async move {
-                let targets = all_targets();
-                run_probe(targets, PROBE_CONCURRENCY, PROBE_TIMEOUT, proxy.as_deref(), false).await
-            });
-            let abort = task.abort_handle();
-            (Some(task), Some(abort))
-        } else {
-            (None, None)
-        };
-
-        // Launch the TUI rendering loop on a dedicated OS thread (crossterm event polling is synchronous/blocking)
+        // Launch TUI immediately — no tasks spawned yet, user presses s to start
         let tui_handle = std::thread::spawn(move || {
-            tui::run_tui_loop(rx, tui_mode, tui_proxy, tui_backend, abort_handle, retest_tx)
+            tui::run_tui_loop(rx, tui_mode, tui_proxy, tui_backend, retest_tx)
         });
 
-        let mut exit_code = match speed_task.await {
-            Ok(Ok((report, code))) => {
-                tui::send(crate::tui::state::Event::Done {
-                    report: Box::new(report),
-                    code,
-                });
-                code
-            }
-            Ok(Err(err)) => {
-                if let Some(a) = &probe_abort { a.abort(); }
-                tui::send(crate::tui::state::Event::Fatal(format!("{err:#}")));
-                2
-            }
-            // Task was aborted (user pressed q during test)
-            Err(e) if e.is_cancelled() => {
-                if let Some(a) = &probe_abort { a.abort(); }
-                130
-            }
-            Err(e) => {
-                if let Some(a) = &probe_abort { a.abort(); }
-                tui::send(crate::tui::state::Event::Fatal(format!("task panic: {e}")));
-                2
-            }
-        };
-
-        // Wait for parallel probe task to finish (full mode)
-        if let Some(task) = probe_task {
-            match task.await {
-                Ok(results) => tui::send(crate::tui::state::Event::ProbeDone { results }),
-                Err(_) => tui::send(crate::tui::state::Event::ProbeDone { results: vec![] }),
-            }
-        }
-
-        // Retest loop: spawn retests as parallel tasks so Speed and Probe can run concurrently
-        let mut speed_retest: Option<tokio::task::JoinHandle<(report::Report, u8)>> = None;
-        let mut probe_retest: Option<tokio::task::JoinHandle<Vec<crate::probe::types::ProbeResult>>> = None;
-
-        // Helper closures for dispatching retest commands (eliminates code duplication)
-        let spawn_speed_retest = |cli: &Cli| -> tokio::task::JoinHandle<(report::Report, u8)> {
+        // Helper closures for dispatching commands
+        let spawn_speed = |cli: &Cli| -> tokio::task::JoinHandle<(report::Report, u8)> {
             let cli_clone = cli.clone();
             tokio::task::spawn(async move {
                 match run(cli_clone).await {
@@ -217,7 +153,7 @@ async fn main() -> ExitCode {
                 }
             })
         };
-        let spawn_speed_retest_backend = |cli: &Cli, backend: String| -> tokio::task::JoinHandle<(report::Report, u8)> {
+        let spawn_speed_backend = |cli: &Cli, backend: String| -> tokio::task::JoinHandle<(report::Report, u8)> {
             let mut cli_clone = cli.clone();
             cli_clone.backend = backend;
             tokio::task::spawn(async move {
@@ -230,7 +166,7 @@ async fn main() -> ExitCode {
                 }
             })
         };
-        let spawn_probe_retest = |cli: &Cli| -> tokio::task::JoinHandle<Vec<crate::probe::types::ProbeResult>> {
+        let spawn_probe = |cli: &Cli| -> tokio::task::JoinHandle<Vec<crate::probe::types::ProbeResult>> {
             let proxy = cli.proxy.clone();
             tokio::task::spawn(async move {
                 let targets = all_targets();
@@ -238,39 +174,41 @@ async fn main() -> ExitCode {
             })
         };
 
-        'retest: loop {
-            // Drain all pending retest commands (non-blocking)
+        let mut exit_code: u8 = 0;
+        let mut speed_task: Option<tokio::task::JoinHandle<(report::Report, u8)>> = None;
+        let mut probe_task: Option<tokio::task::JoinHandle<Vec<crate::probe::types::ProbeResult>>> = None;
+
+        // Unified command loop — handles initial start and retests
+        'cmd: loop {
+            // Drain pending commands
             loop {
                 match retest_rx.try_recv() {
-                    Ok(RetestCmd::Speed) if speed_retest.is_none() => {
-                        speed_retest = Some(spawn_speed_retest(&cli));
-                    }
-                    Ok(RetestCmd::SpeedWithBackend(ref backend)) if speed_retest.is_none() => {
-                        speed_retest = Some(spawn_speed_retest_backend(&cli, backend.clone()));
-                    }
-                    Ok(RetestCmd::Probe) if probe_retest.is_none() => {
-                        probe_retest = Some(spawn_probe_retest(&cli));
-                    }
-                    Ok(_) => {} // duplicate command while already running, ignore
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        // TUI closed — wait for any in-flight tasks then exit
-                        if let Some(task) = speed_retest.take() {
-                            if let Ok((_, code)) = task.await {
-                                exit_code = code;
+                    Ok(cmd) => {
+                        match cmd {
+                            RetestCmd::StartAll => {
+                                if speed_task.is_none() { speed_task = Some(spawn_speed(&cli)); }
+                                if probe_task.is_none() { probe_task = Some(spawn_probe(&cli)); }
                             }
+                            RetestCmd::Speed if speed_task.is_none() => {
+                                speed_task = Some(spawn_speed(&cli));
+                            }
+                            RetestCmd::SpeedWithBackend(ref backend) if speed_task.is_none() => {
+                                speed_task = Some(spawn_speed_backend(&cli, backend.clone()));
+                            }
+                            RetestCmd::Probe if probe_task.is_none() => {
+                                probe_task = Some(spawn_probe(&cli));
+                            }
+                            _ => {}
                         }
-                        if let Some(task) = probe_retest.take() {
-                            let _ = task.await;
-                        }
-                        break 'retest;
                     }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break 'cmd,
                 }
             }
 
-            // Check if any in-flight retest tasks have completed
-            if speed_retest.as_ref().map_or(false, |t| t.is_finished()) {
-                let task = speed_retest.take().unwrap();
+            // Check completed tasks
+            if speed_task.as_ref().map_or(false, |t| t.is_finished()) {
+                let task = speed_task.take().unwrap();
                 match task.await {
                     Ok((report, code)) => {
                         exit_code = code;
@@ -279,47 +217,39 @@ async fn main() -> ExitCode {
                         });
                     }
                     Err(_) => {
-                        tui::send(crate::tui::state::Event::Fatal("speed retest panic".to_string()));
+                        tui::send(crate::tui::state::Event::Fatal("speed task panic".to_string()));
                         exit_code = 2;
                     }
                 }
             }
-            if probe_retest.as_ref().map_or(false, |t| t.is_finished()) {
-                let task = probe_retest.take().unwrap();
+            if probe_task.as_ref().map_or(false, |t| t.is_finished()) {
+                let task = probe_task.take().unwrap();
                 match task.await {
                     Ok(results) => tui::send(crate::tui::state::Event::ProbeDone { results }),
                     Err(_) => tui::send(crate::tui::state::Event::ProbeDone { results: vec![] }),
                 }
             }
 
-            // Wait for next command or timeout
-            if speed_retest.is_none() && probe_retest.is_none() {
-                // No in-flight tasks → block with timeout to avoid busy-spinning
+            // Wait for next event
+            if speed_task.is_none() && probe_task.is_none() {
                 match retest_rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                    Ok(cmd) => {
-                        match cmd {
-                            RetestCmd::Speed if speed_retest.is_none() => {
-                                speed_retest = Some(spawn_speed_retest(&cli));
-                            }
-                            RetestCmd::SpeedWithBackend(ref backend) if speed_retest.is_none() => {
-                                speed_retest = Some(spawn_speed_retest_backend(&cli, backend.clone()));
-                            }
-                            RetestCmd::Probe if probe_retest.is_none() => {
-                                probe_retest = Some(spawn_probe_retest(&cli));
-                            }
-                            _ => {}
+                    Ok(cmd) => match cmd {
+                        RetestCmd::StartAll => {
+                            speed_task = Some(spawn_speed(&cli));
+                            probe_task = Some(spawn_probe(&cli));
                         }
-                    }
+                        RetestCmd::Speed => { speed_task = Some(spawn_speed(&cli)); }
+                        RetestCmd::SpeedWithBackend(ref b) => { speed_task = Some(spawn_speed_backend(&cli, b.clone())); }
+                        RetestCmd::Probe => { probe_task = Some(spawn_probe(&cli)); }
+                    },
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break 'retest,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break 'cmd,
                 }
             } else {
-                // In-flight tasks exist; poll briefly
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         }
 
-        // Wait for the TUI thread to exit (user confirms with a keypress)
         let _ = tui_handle.join();
         ExitCode::from(exit_code)
     } else {

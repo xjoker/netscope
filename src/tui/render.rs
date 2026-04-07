@@ -178,7 +178,10 @@ fn build_header_segments(state: &AppState) -> (Vec<Span<'static>>, Vec<Span<'sta
 
     // ── v4 segment ──
     let mut v4: Vec<Span> = Vec::new();
-    if !state.egress_done {
+    if state.idle {
+        // Idle: no spinner, just show waiting hint
+        v4.push(dim("  waiting to start"));
+    } else if !state.egress_done {
         v4.push(dim("  "));
         v4.push(Span::styled(spin(state.tick).to_string(), Style::default().fg(ACCENT)));
         v4.push(dim(" detecting..."));
@@ -515,6 +518,13 @@ fn draw_speed_panel(f: &mut Frame, area: Rect, state: &mut AppState) {
                 Span::styled(bar, Style::default().fg(if done == total { Color::Green } else { ACCENT })),
             ]));
         }
+    } else if state.idle {
+        // Idle: waiting for user to start
+        lines.push(Line::from(vec![
+            dim("  press "),
+            cyan_bold("s"),
+            dim(" to start test"),
+        ]));
     } else {
         // Pre-test or single-path: show waiting/resolving status
         lines.push(Line::from(vec![
@@ -637,6 +647,20 @@ fn running_progress(state: &AppState) -> (&'static str, usize, usize) {
 }
 
 fn draw_unified_footer(f: &mut Frame, area: Rect, state: &AppState) {
+    // Idle state: waiting for user to start
+    if state.idle {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(ACCENT));
+        let para = Paragraph::new(Line::from(vec![
+            Span::styled(" s: start test  b: switch backend  q: quit",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        ])).block(block);
+        f.render_widget(para, area);
+        return;
+    }
+
     if state.finished && !state.retesting_speed && !state.retesting_probe {
         let code = state.exit_code;
         let (col, text) = if code == 0 {
@@ -669,7 +693,7 @@ fn draw_unified_footer(f: &mut Frame, area: Rect, state: &AppState) {
         let para = Paragraph::new(Line::from(vec![
             Span::raw(" "),
             Span::styled(spin(state.tick).to_string(), Style::default().fg(ACCENT)),
-            dim(format!("  {label}   q to quit")),
+            dim(format!("  {label}   q: stop")),
         ])).block(block);
         f.render_widget(para, area);
         return;
@@ -690,7 +714,7 @@ fn draw_unified_footer(f: &mut Frame, area: Rect, state: &AppState) {
         Span::styled(spin(state.tick).to_string(), Style::default().fg(ACCENT)),
         Span::raw("  "),
         Span::styled(bar, Style::default().fg(ACCENT)),
-        dim(format!("  {done_steps}/{total_steps}  {stage_label}   q to quit")),
+        dim(format!("  {done_steps}/{total_steps}  {stage_label}   q: stop")),
     ])).block(block);
     f.render_widget(para, area);
 }

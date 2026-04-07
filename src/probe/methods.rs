@@ -114,6 +114,8 @@ async fn probe_trace(client: &Client, target: &ProbeTarget, timeout_secs: u64) -
                 // Non-2xx: the server responded, so the site IS reachable at the network level.
                 // The /cdn-cgi/trace endpoint may be disabled (403/404) — that doesn't mean
                 // the site is blocked. Only timeouts and connection failures indicate blocking.
+                // Consume body so the connection returns to pool for avg_ttfb reuse.
+                let _ = resp.bytes().await;
                 let ttfb_ms = avg_ttfb(client, target.url, first_ms).await;
                 return ProbeResult {
                     name: target.name.to_string(),
@@ -211,6 +213,9 @@ async fn probe_http(client: &Client, target: &ProbeTarget, timeout_secs: u64) ->
             let status     = resp.status();
             let status_code = status.as_u16();
             let reachable   = status.is_success() || status_code < 500;
+
+            // Consume body so the connection returns to pool for avg_ttfb reuse.
+            let _ = resp.bytes().await;
 
             let ttfb_ms = if reachable {
                 avg_ttfb(client, target.url, first_ms).await
@@ -326,6 +331,9 @@ async fn probe_header(client: &Client, target: &ProbeTarget, timeout_secs: u64) 
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.to_string())
             });
+
+            // Consume body so the connection returns to pool for avg_ttfb reuse.
+            let _ = resp.bytes().await;
 
             let ttfb_ms = if reachable {
                 avg_ttfb(client, target.url, first_ms).await

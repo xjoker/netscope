@@ -48,7 +48,6 @@ pub fn run_tui_loop(
     mode: String,
     proxy: Option<String>,
     backend: String,
-    abort_handle: tokio::task::AbortHandle,
     retest_tx: std::sync::mpsc::Sender<RetestCmd>,
 ) -> io::Result<()> {
     enable_raw_mode()?;
@@ -80,10 +79,43 @@ pub fn run_tui_loop(
                 // Windows emits both Press and Release events; only handle Press.
                 if key.kind != KeyEventKind::Press { continue; }
                 match key.code {
-                    // q/Q/Esc exit at any time; abort the task if speed test is still running
+                    // q/Q/Esc: always exit immediately
                     KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
-                        abort_handle.abort();
                         break 'outer Ok(());
+                    }
+                    // s/S: start test (idle) or retest focused panel (done)
+                    KeyCode::Char('s') | KeyCode::Char('S') => {
+                        if state.idle {
+                            if retest_tx.send(RetestCmd::StartAll).is_ok() {
+                                state.idle = false;
+                                reset_speed_state(&mut state);
+                                reset_probe_state(&mut state);
+                            }
+                        } else if state.speed_done && !state.retesting_speed
+                               && state.result_focus == ResultFocus::Speed {
+                            if retest_tx.send(RetestCmd::Speed).is_ok() {
+                                reset_speed_state(&mut state);
+                            }
+                        } else if state.probe_done && !state.retesting_probe
+                               && state.result_focus == ResultFocus::Connectivity {
+                            if retest_tx.send(RetestCmd::Probe).is_ok() {
+                                reset_probe_state(&mut state);
+                            }
+                        }
+                    }
+                    // r/R: retest focused panel (alias for s when done)
+                    KeyCode::Char('r') | KeyCode::Char('R') => {
+                        if state.speed_done && !state.retesting_speed
+                            && state.result_focus == ResultFocus::Speed {
+                            if retest_tx.send(RetestCmd::Speed).is_ok() {
+                                reset_speed_state(&mut state);
+                            }
+                        } else if state.probe_done && !state.retesting_probe
+                            && state.result_focus == ResultFocus::Connectivity {
+                            if retest_tx.send(RetestCmd::Probe).is_ok() {
+                                reset_probe_state(&mut state);
+                            }
+                        }
                     }
                     // Tab: toggle focus between Speed Results and Connectivity
                     KeyCode::Tab => {
@@ -92,70 +124,25 @@ pub fn run_tui_loop(
                             ResultFocus::Connectivity => ResultFocus::Speed,
                         };
                     }
-                    // R/r: retest the focused panel (only when that panel has completed)
-                    KeyCode::Char('r') | KeyCode::Char('R') => {
-                        let cmd = match state.result_focus {
-                            ResultFocus::Speed if state.speed_done && !state.retesting_speed => {
-                                Some(RetestCmd::Speed)
-                            }
-                            ResultFocus::Connectivity if state.probe_done && !state.retesting_probe => {
-                                Some(RetestCmd::Probe)
-                            }
-                            _ => None, // panel not yet completed or already retesting, ignore
-                        };
-                        if let Some(cmd) = cmd {
-                            // Send first — only modify state if the channel is still open
-                            if retest_tx.send(cmd.clone()).is_ok() {
-                                match &cmd {
-                                    RetestCmd::Speed | RetestCmd::SpeedWithBackend(_) => {
-                                        state.speed_done = false;
-                                        state.finished = false;
-                                        state.retesting_speed = true;
-                                        state.final_report = None;
-                                        state.paths.clear();
-                                        state.scroll_speed = 0;
-                                        state.ping_status = StageStatus::Waiting;
-                                        state.download_status = StageStatus::Waiting;
-                                        state.upload_status = StageStatus::Waiting;
-                                    }
-                                    RetestCmd::Probe => {
-                                        state.probe_results.clear();
-                                        state.partial_probe_results.clear();
-                                        state.probe_targets.clear();
-                                        state.probe_progress = Some((0, 0));
-                                        state.probe_done = false;
-                                        state.finished = false;
-                                        state.scroll_conn = 0;
-                                        state.retesting_probe = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
                     // b/B: switch backend and retest speed (only when speed test is done)
                     KeyCode::Char('b') | KeyCode::Char('B') => {
-                        if state.speed_done && !state.retesting_speed {
+                        if state.idle || (state.speed_done && !state.retesting_speed) {
                             let new_backend = if state.backend == "apple" {
                                 "cloudflare".to_string()
                             } else {
                                 "apple".to_string()
                             };
-                            let cmd = RetestCmd::SpeedWithBackend(new_backend.clone());
-                            if retest_tx.send(cmd).is_ok() {
-                                state.backend = new_backend;
-                                state.speed_done = false;
-                                state.finished = false;
-                                state.retesting_speed = true;
-                                state.final_report = None;
-                                state.paths.clear();
-                                state.scroll_speed = 0;
-                                state.ping_status = StageStatus::Waiting;
-                                state.download_status = StageStatus::Waiting;
-                                state.upload_status = StageStatus::Waiting;
+                            state.backend = new_backend;
+                            // If not idle, also trigger a retest with the new backend
+                            if !state.idle {
+                                let cmd = RetestCmd::SpeedWithBackend(state.backend.clone());
+                                if retest_tx.send(cmd).is_ok() {
+                                    reset_speed_state(&mut state);
+                                }
                             }
                         }
                     }
-                    // Scroll down in focused panel (clamped to prevent "key blackhole")
+                    // Scroll down in focused panel
                     KeyCode::Down | KeyCode::Char('j') => {
                         match state.result_focus {
                             ResultFocus::Speed        => state.scroll_speed = state.scroll_speed.saturating_add(1).min(500),
@@ -179,6 +166,29 @@ pub fn run_tui_loop(
     execute!(term.backend_mut(), LeaveAlternateScreen)?;
     term.show_cursor()?;
     result
+}
+
+fn reset_speed_state(state: &mut AppState) {
+    state.speed_done = false;
+    state.finished = false;
+    state.retesting_speed = true;
+    state.final_report = None;
+    state.paths.clear();
+    state.scroll_speed = 0;
+    state.ping_status = StageStatus::Waiting;
+    state.download_status = StageStatus::Waiting;
+    state.upload_status = StageStatus::Waiting;
+}
+
+fn reset_probe_state(state: &mut AppState) {
+    state.probe_results.clear();
+    state.partial_probe_results.clear();
+    state.probe_targets.clear();
+    state.probe_progress = Some((0, 0));
+    state.probe_done = false;
+    state.finished = false;
+    state.scroll_conn = 0;
+    state.retesting_probe = true;
 }
 
 fn apply_event(state: &mut AppState, ev: Event) {

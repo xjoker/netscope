@@ -1,8 +1,10 @@
 use crate::report::Report;
 
-/// Command sent from TUI back to main thread to trigger a retest
+/// Command sent from TUI back to main thread to trigger a test run
 #[derive(Debug, Clone)]
 pub enum RetestCmd {
+    /// Start or retest: speed + probe (full mode)
+    StartAll,
     Speed,
     Probe,
     /// Retest speed with a different backend (e.g. "apple" or "cloudflare")
@@ -170,6 +172,8 @@ pub struct AppState {
     pub retesting_speed: bool,
     /// Whether a connectivity retest is currently in progress
     pub retesting_probe: bool,
+    /// Idle state — waiting for user to press s to start
+    pub idle: bool,
 }
 
 impl AppState {
@@ -184,12 +188,9 @@ impl AppState {
     }
 
     pub fn new(mode: &str, proxy: Option<String>, backend: String) -> Self {
-        let (ping_status, download_status, upload_status) = match mode {
-            "ping"     => (StageStatus::Running, StageStatus::Waiting, StageStatus::Waiting),
-            "download" => (StageStatus::Waiting, StageStatus::Running, StageStatus::Waiting),
-            "upload"   => (StageStatus::Waiting, StageStatus::Waiting, StageStatus::Running),
-            _          => (StageStatus::Running, StageStatus::Waiting, StageStatus::Waiting),
-        };
+        // Idle mode: all stages waiting; they transition to Running when the user starts the test
+        let (ping_status, download_status, upload_status) =
+            (StageStatus::Waiting, StageStatus::Waiting, StageStatus::Waiting);
         AppState {
             mode: mode.to_string(),
             proxy,
@@ -227,6 +228,7 @@ impl AppState {
             scroll_conn: 0,
             retesting_speed: false,
             retesting_probe: false,
+            idle: true,
         }
     }
 }
